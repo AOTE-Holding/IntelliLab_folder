@@ -8,6 +8,7 @@
 import Foundation
 import AppKit
 import CoreGraphics
+import CoreImage
 
 // MARK: - Error Types
 
@@ -221,52 +222,64 @@ class FileSystemService: ObservableObject {
 
     /// Rotate image by 90 degrees (positive = clockwise, negative = counter-clockwise)
     func rotateImage(at url: URL, degrees: CGFloat) throws {
-        guard let image = NSImage(contentsOf: url) else {
+        // Load image as CIImage
+        guard let ciImage = CIImage(contentsOf: url) else {
             throw ImageError.unableToLoadImage
         }
 
-        let originalSize = image.size
-        // Swap dimensions for 90 degree rotations
-        let rotatedSize = NSSize(width: originalSize.height, height: originalSize.width)
+        // Create rotation transform (Core Image uses radians, clockwise is negative)
+        let radians = -degrees * .pi / 180
+        let transform = CGAffineTransform(rotationAngle: radians)
 
-        // Create rotated image
-        let rotatedImage = NSImage(size: rotatedSize)
-        rotatedImage.lockFocus()
+        // Apply rotation
+        var rotatedImage = ciImage.transformed(by: transform)
 
-        let transform = NSAffineTransform()
-        transform.translateX(by: rotatedSize.width / 2, yBy: rotatedSize.height / 2)
-        transform.rotate(byDegrees: degrees)
-        transform.translateX(by: -originalSize.width / 2, yBy: -originalSize.height / 2)
-        transform.concat()
+        // After rotation, the image origin may be negative - translate to origin
+        let originX = rotatedImage.extent.origin.x
+        let originY = rotatedImage.extent.origin.y
+        rotatedImage = rotatedImage.transformed(by: CGAffineTransform(translationX: -originX, y: -originY))
 
-        image.draw(at: .zero, from: NSRect(origin: .zero, size: originalSize), operation: .copy, fraction: 1.0)
-        rotatedImage.unlockFocus()
+        // Create CIContext for rendering
+        let context = CIContext(options: [.useSoftwareRenderer: false])
 
-        // Get bitmap representation
-        guard let tiffData = rotatedImage.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiffData) else {
-            throw ImageError.unableToCreateBitmapRep
-        }
-
+        // Determine output format and save
         let ext = url.pathExtension.lowercased()
-        let imageData: Data?
+
         switch ext {
         case "jpg", "jpeg":
-            imageData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.9])
-        case "png":
-            imageData = bitmap.representation(using: .png, properties: [:])
-        case "gif":
-            imageData = bitmap.representation(using: .gif, properties: [:])
-        case "bmp":
-            imageData = bitmap.representation(using: .bmp, properties: [:])
-        case "tiff", "tif":
-            imageData = bitmap.representation(using: .tiff, properties: [:])
-        default:
-            imageData = bitmap.representation(using: .png, properties: [:])
-        }
+            guard let colorSpace = rotatedImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
+                  let jpegData = context.jpegRepresentation(of: rotatedImage, colorSpace: colorSpace, options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9]) else {
+                throw ImageError.unableToCreateImageData
+            }
+            try jpegData.write(to: url)
 
-        guard let data = imageData else { throw ImageError.unableToCreateImageData }
-        try data.write(to: url)
+        case "png":
+            guard let colorSpace = rotatedImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
+                  let pngData = context.pngRepresentation(of: rotatedImage, format: .RGBA8, colorSpace: colorSpace) else {
+                throw ImageError.unableToCreateImageData
+            }
+            try pngData.write(to: url)
+
+        case "heic", "heif":
+            guard let colorSpace = rotatedImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
+                  let heicData = context.heifRepresentation(of: rotatedImage, format: .RGBA8, colorSpace: colorSpace) else {
+                throw ImageError.unableToCreateImageData
+            }
+            try heicData.write(to: url)
+
+        default:
+            // Fallback: render to CGImage and save as PNG
+            guard let cgImage = context.createCGImage(rotatedImage, from: rotatedImage.extent) else {
+                throw ImageError.unableToCreateRotatedImage
+            }
+            let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            guard let tiffData = nsImage.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiffData),
+                  let pngData = bitmap.representation(using: .png, properties: [:]) else {
+                throw ImageError.unableToCreateImageData
+            }
+            try pngData.write(to: url)
+        }
     }
 }
 
