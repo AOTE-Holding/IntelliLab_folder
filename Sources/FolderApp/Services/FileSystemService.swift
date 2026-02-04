@@ -7,6 +7,22 @@
 
 import Foundation
 import AppKit
+import CoreGraphics
+
+// MARK: - Error Types
+
+enum CompressionError: Error {
+    case noItemsToCompress
+    case compressionFailed
+}
+
+enum ImageError: Error {
+    case unableToLoadImage
+    case unableToCreateContext
+    case unableToCreateRotatedImage
+    case unableToCreateBitmapRep
+    case unableToCreateImageData
+}
 
 @MainActor
 class FileSystemService: ObservableObject {
@@ -148,6 +164,109 @@ class FileSystemService: ObservableObject {
         }
 
         return totalSize
+    }
+
+    // MARK: - Duplicate, Compress, Rotate Operations
+
+    /// Duplicate a file or folder with " copy" suffix
+    func duplicateItem(at url: URL) throws -> URL {
+        let directory = url.deletingLastPathComponent()
+        let filename = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+
+        var counter = 1
+        var newURL: URL
+
+        repeat {
+            let suffix = counter == 1 ? " copy" : " copy \(counter)"
+            let newFilename = ext.isEmpty ? "\(filename)\(suffix)" : "\(filename)\(suffix).\(ext)"
+            newURL = directory.appendingPathComponent(newFilename)
+            counter += 1
+        } while fileManager.fileExists(atPath: newURL.path)
+
+        try fileManager.copyItem(at: url, to: newURL)
+        return newURL
+    }
+
+    /// Compress files/folders into a .zip archive
+    func compressItems(at urls: [URL]) throws -> URL {
+        guard !urls.isEmpty else { throw CompressionError.noItemsToCompress }
+
+        let directory = urls[0].deletingLastPathComponent()
+        let baseName = urls.count == 1 ? urls[0].deletingPathExtension().lastPathComponent : "Archive"
+        var archiveURL = directory.appendingPathComponent("\(baseName).zip")
+
+        // Ensure unique name
+        var counter = 2
+        while fileManager.fileExists(atPath: archiveURL.path) {
+            archiveURL = directory.appendingPathComponent("\(baseName) \(counter).zip")
+            counter += 1
+        }
+
+        // Use /usr/bin/zip
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
+        process.currentDirectoryURL = directory
+        process.arguments = ["-r", archiveURL.lastPathComponent] + urls.map { $0.lastPathComponent }
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            throw CompressionError.compressionFailed
+        }
+
+        return archiveURL
+    }
+
+    /// Rotate image by 90 degrees (positive = clockwise, negative = counter-clockwise)
+    func rotateImage(at url: URL, degrees: CGFloat) throws {
+        guard let image = NSImage(contentsOf: url) else {
+            throw ImageError.unableToLoadImage
+        }
+
+        let originalSize = image.size
+        // Swap dimensions for 90 degree rotations
+        let rotatedSize = NSSize(width: originalSize.height, height: originalSize.width)
+
+        // Create rotated image
+        let rotatedImage = NSImage(size: rotatedSize)
+        rotatedImage.lockFocus()
+
+        let transform = NSAffineTransform()
+        transform.translateX(by: rotatedSize.width / 2, yBy: rotatedSize.height / 2)
+        transform.rotate(byDegrees: degrees)
+        transform.translateX(by: -originalSize.width / 2, yBy: -originalSize.height / 2)
+        transform.concat()
+
+        image.draw(at: .zero, from: NSRect(origin: .zero, size: originalSize), operation: .copy, fraction: 1.0)
+        rotatedImage.unlockFocus()
+
+        // Get bitmap representation
+        guard let tiffData = rotatedImage.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiffData) else {
+            throw ImageError.unableToCreateBitmapRep
+        }
+
+        let ext = url.pathExtension.lowercased()
+        let imageData: Data?
+        switch ext {
+        case "jpg", "jpeg":
+            imageData = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.9])
+        case "png":
+            imageData = bitmap.representation(using: .png, properties: [:])
+        case "gif":
+            imageData = bitmap.representation(using: .gif, properties: [:])
+        case "bmp":
+            imageData = bitmap.representation(using: .bmp, properties: [:])
+        case "tiff", "tif":
+            imageData = bitmap.representation(using: .tiff, properties: [:])
+        default:
+            imageData = bitmap.representation(using: .png, properties: [:])
+        }
+
+        guard let data = imageData else { throw ImageError.unableToCreateImageData }
+        try data.write(to: url)
     }
 }
 

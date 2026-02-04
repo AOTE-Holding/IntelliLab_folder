@@ -334,6 +334,8 @@ struct FileGridItemWithRename: View {
                 RoundedRectangle(cornerRadius: 8)
                     .stroke(Color.folderAccent, lineWidth: isSelected ? 2 : 0)
             )
+            .contentShape(Rectangle())
+            .frame(width: CGFloat(viewModel.viewMode.iconSize + 40) + 16)
             .transaction { $0.animation = nil }
             .task {
                 // Load thumbnail when entering rename mode
@@ -343,7 +345,7 @@ struct FileGridItemWithRename: View {
             }
         } else {
             // Normal display mode
-            FileGridItem(item: item, isSelected: isSelected, clipboardManager: clipboardManager, isDimmed: isDimmed)
+            FileGridItem(item: item, isSelected: isSelected, clipboardManager: clipboardManager, isDimmed: isDimmed, iconSize: CGFloat(viewModel.viewMode.iconSize))
                 .onTapGesture(count: 2) {
                     onDoubleClick()
                 }
@@ -359,6 +361,7 @@ struct FileGridItem: View {
     let isSelected: Bool
     @ObservedObject var clipboardManager: ClipboardManager
     let isDimmed: Bool
+    let iconSize: CGFloat
     @StateObject private var iconService = IconService.shared
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var thumbnailService = ThumbnailService.shared
@@ -392,14 +395,14 @@ struct FileGridItem: View {
                     Image(nsImage: thumbnail)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 64, height: 64)
+                        .frame(width: iconSize, height: iconSize)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
                     // Show regular icon
-                    iconService.swiftUIIcon(for: item, size: 64)
+                    iconService.swiftUIIcon(for: item, size: iconSize)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 64, height: 64)
+                        .frame(width: iconSize, height: iconSize)
                 }
 
                 // Symlink badge
@@ -430,7 +433,7 @@ struct FileGridItem: View {
                 .font(.system(size: 12))
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
-                .frame(width: 100)
+                .frame(width: iconSize + 40)
                 .truncationMode(.middle)
         }
         .padding(8)
@@ -462,6 +465,12 @@ struct FileContextMenu: View {
     @StateObject private var settingsManager = SettingsManager.shared
     @State private var showingRenameAlert = false
     @State private var newName = ""
+
+    private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "heic", "heif", "webp"]
+
+    private var isImageFile: Bool {
+        item.type == .file && imageExtensions.contains(item.path.pathExtension.lowercased())
+    }
 
     var body: some View {
         Button("Open") {
@@ -548,6 +557,27 @@ struct FileContextMenu: View {
                 viewModel.items.filter { viewModel.selectedItems.contains($0.id) } :
                 [item]
             clipboardManager.cut(items: itemsToCut)
+        }
+
+        Divider()
+
+        Button("Duplicate") {
+            duplicateItems()
+        }
+
+        Button("Compress") {
+            compressItems()
+        }
+
+        if isImageFile {
+            Menu("Rotate Image") {
+                Button("Rotate Left (90°)") {
+                    rotateImage(degrees: -90)
+                }
+                Button("Rotate Right (90°)") {
+                    rotateImage(degrees: 90)
+                }
+            }
         }
 
         Divider()
@@ -724,5 +754,29 @@ struct FileContextMenu: View {
             let config = NSWorkspace.OpenConfiguration()
             NSWorkspace.shared.open([path], withApplicationAt: terminalURL, configuration: config)
         }
+    }
+
+    private func duplicateItems() {
+        let items = viewModel.isSelected(item) ?
+            viewModel.items.filter { viewModel.selectedItems.contains($0.id) } : [item]
+
+        for duplicateItem in items {
+            _ = try? FileSystemService.shared.duplicateItem(at: duplicateItem.path)
+        }
+        viewModel.refresh()
+    }
+
+    private func compressItems() {
+        let items = viewModel.isSelected(item) ?
+            viewModel.items.filter { viewModel.selectedItems.contains($0.id) } : [item]
+
+        _ = try? FileSystemService.shared.compressItems(at: items.map { $0.path })
+        viewModel.refresh()
+    }
+
+    private func rotateImage(degrees: CGFloat) {
+        try? FileSystemService.shared.rotateImage(at: item.path, degrees: degrees)
+        ThumbnailService.shared.clearCache()
+        viewModel.refresh()
     }
 }

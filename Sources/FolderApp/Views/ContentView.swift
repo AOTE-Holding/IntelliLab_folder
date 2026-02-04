@@ -441,7 +441,7 @@ struct SearchResultsGridView: View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: spacing) {
                 ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
-                    FileGridItem(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false)
+                    FileGridItem(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false, iconSize: CGFloat(fileExplorerViewModel.viewMode.iconSize))
                         .overlay {
                             // Multi-file drag overlay when multiple items selected
                             if searchViewModel.selectedItems.count > 1 && searchViewModel.isSelected(item) {
@@ -617,7 +617,7 @@ struct TagFilterResultsGridView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: spacing) {
                         ForEach(Array(viewModel.tagFilteredItems), id: \.id) { (item: FileSystemItem) in
-                            FileGridItem(item: item, isSelected: viewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false)
+                            FileGridItem(item: item, isSelected: viewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false, iconSize: CGFloat(viewModel.viewMode.iconSize))
                                 .onDrag {
                                     NSItemProvider(object: item.path as NSURL)
                                 }
