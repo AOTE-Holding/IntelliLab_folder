@@ -101,9 +101,22 @@ class DraggableView: NSView, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         if operation == .delete {
-            // Files were dragged to Dock Trash -- move them to trash
+            var sourceURLs: [URL] = []
+            var trashURLs: [URL] = []
             for url in fileURLs {
-                try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+                var trashNSURL: NSURL?
+                try? FileManager.default.trashItem(at: url, resultingItemURL: &trashNSURL)
+                sourceURLs.append(url)
+                if let trashURL = trashNSURL as URL? {
+                    trashURLs.append(trashURL)
+                }
+            }
+            if sourceURLs.count == trashURLs.count && !sourceURLs.isEmpty {
+                Task { @MainActor in
+                    ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                        type: .trash, sourceURLs: sourceURLs, destinationURLs: trashURLs
+                    ))
+                }
             }
         }
         isDragging = false

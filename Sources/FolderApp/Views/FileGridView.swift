@@ -239,26 +239,26 @@ struct FileGridView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider], destination: FileSystemItem) -> Bool {
-        // Only allow drops on folders
         guard destination.type == .folder else { return false }
 
         for provider in providers {
             _ = provider.loadObject(ofClass: NSURL.self) { [weak viewModel] object, error in
-                guard let url = object as? URL, error == nil else {
-                    return
-                }
+                guard let url = object as? URL, error == nil else { return }
 
                 let destinationURL = destination.path.appendingPathComponent(url.lastPathComponent)
-
-                // Don't move if source and destination are the same
                 guard url != destinationURL else { return }
-
-                // Check if destination already exists
                 guard !FileManager.default.fileExists(atPath: destinationURL.path) else { return }
 
-                try? FileManager.default.moveItem(at: url, to: destinationURL)
-                Task { @MainActor in
-                    viewModel?.refresh()
+                do {
+                    try FileManager.default.moveItem(at: url, to: destinationURL)
+                    Task { @MainActor in
+                        ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                            type: .move, sourceURLs: [url], destinationURLs: [destinationURL]
+                        ))
+                        viewModel?.refresh()
+                    }
+                } catch {
+                    // Move failed silently
                 }
             }
         }
@@ -628,14 +628,28 @@ struct FileContextMenu: View {
     }
 
     private func moveToTrash() {
-        // Trash all selected items if item is in selection, otherwise just this item
         let itemsToTrash = viewModel.isSelected(item) ?
             viewModel.items.filter { viewModel.selectedItems.contains($0.id) } :
             [item]
 
+        var sourceURLs: [URL] = []
+        var trashURLs: [URL] = []
+
         for trashItem in itemsToTrash {
-            try? FileManager.default.trashItem(at: trashItem.path, resultingItemURL: nil)
+            var trashNSURL: NSURL?
+            try? FileManager.default.trashItem(at: trashItem.path, resultingItemURL: &trashNSURL)
+            sourceURLs.append(trashItem.path)
+            if let trashURL = trashNSURL as URL? {
+                trashURLs.append(trashURL)
+            }
         }
+
+        if sourceURLs.count == trashURLs.count && !sourceURLs.isEmpty {
+            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                type: .trash, sourceURLs: sourceURLs, destinationURLs: trashURLs
+            ))
+        }
+
         viewModel.selectedItems.removeAll()
         viewModel.refresh()
     }

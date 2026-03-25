@@ -201,6 +201,21 @@ struct ContentView: View {
                 }
                 return false
 
+            case "z":
+                if !isTextField {
+                    if modifiers.contains(.shift) {
+                        // Cmd+Shift+Z: Redo
+                        ActionHistoryManager.shared.redo()
+                        viewModel.refresh()
+                    } else {
+                        // Cmd+Z: Undo
+                        ActionHistoryManager.shared.undo()
+                        viewModel.refresh()
+                    }
+                    return true
+                }
+                return false
+
             case "n":
                 // Cmd+Shift+N: New folder (only when not in text field)
                 if !isTextField && modifiers.contains(.shift) {

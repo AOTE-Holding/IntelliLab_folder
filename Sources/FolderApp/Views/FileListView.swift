@@ -235,26 +235,26 @@ struct FileListView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider], destination: FileSystemItem) -> Bool {
-        // Only allow drops on folders
         guard destination.type == .folder else { return false }
 
         for provider in providers {
             _ = provider.loadObject(ofClass: NSURL.self) { [weak viewModel] object, error in
-                guard let url = object as? URL, error == nil else {
-                    return
-                }
+                guard let url = object as? URL, error == nil else { return }
 
                 let destinationURL = destination.path.appendingPathComponent(url.lastPathComponent)
-
-                // Don't move if source and destination are the same
                 guard url != destinationURL else { return }
-
-                // Check if destination already exists
                 guard !FileManager.default.fileExists(atPath: destinationURL.path) else { return }
 
-                try? FileManager.default.moveItem(at: url, to: destinationURL)
-                Task { @MainActor in
-                    viewModel?.refresh()
+                do {
+                    try FileManager.default.moveItem(at: url, to: destinationURL)
+                    Task { @MainActor in
+                        ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                            type: .move, sourceURLs: [url], destinationURLs: [destinationURL]
+                        ))
+                        viewModel?.refresh()
+                    }
+                } catch {
+                    // Move failed silently
                 }
             }
         }

@@ -568,12 +568,24 @@ class FileExplorerViewModel: ObservableObject {
             return
         }
 
+        var sourceURLs: [URL] = []
+        var trashURLs: [URL] = []
+
         for item in selectedItemsList {
             do {
-                try FileManager.default.trashItem(at: item.path, resultingItemURL: nil)
+                var trashNSURL: NSURL?
+                try FileManager.default.trashItem(at: item.path, resultingItemURL: &trashNSURL)
+                sourceURLs.append(item.path)
+                trashURLs.append(trashNSURL as URL? ?? item.path)
             } catch {
                 errorMessage = "Failed to delete item: \(error.localizedDescription)"
             }
+        }
+
+        if !sourceURLs.isEmpty {
+            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                type: .trash, sourceURLs: sourceURLs, destinationURLs: trashURLs
+            ))
         }
 
         selectedItems.removeAll()

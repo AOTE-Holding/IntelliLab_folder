@@ -62,6 +62,7 @@ struct SettingsView: View {
                 // File Display Settings
                 Section(header: Text("Files").font(.headline)) {
                     Toggle("Show Hidden Files", isOn: $settingsManager.settings.showHiddenFiles)
+                    Toggle("Enable Undo/Redo (Cmd+Z / Cmd+Shift+Z)", isOn: $settingsManager.settings.undoRedoEnabled)
                 }
 
                 // Sidebar Visibility

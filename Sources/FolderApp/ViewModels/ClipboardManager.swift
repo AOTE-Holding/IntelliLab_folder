@@ -52,27 +52,25 @@ class ClipboardManager: ObservableObject {
     // MARK: - Paste
 
     func paste(to destination: URL) async throws -> PasteResult {
-        // Read URLs from pasteboard
         guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
               !urls.isEmpty else {
             throw ClipboardError.nothingToPaste
         }
 
         var succeeded: [URL] = []
+        var sourceURLsForHistory: [URL] = []
         var failed: [(URL, Error)] = []
         var conflicts: [URL] = []
+        let actionType = clipboardAction
 
         for sourceURL in urls {
             let fileName = sourceURL.lastPathComponent
             var destinationURL = destination.appendingPathComponent(fileName)
 
-            // Check if we're pasting into the same folder
             let isSameFolder = sourceURL.deletingLastPathComponent() == destination
 
-            // Check if destination already exists
             if fileSystemService.pathExists(destinationURL) {
                 if isSameFolder && clipboardAction == .copy {
-                    // Auto-duplicate when copying in same folder (Finder-style)
                     destinationURL = generateUniqueURL(for: destinationURL)
                 } else {
                     conflicts.append(sourceURL)
@@ -82,19 +80,26 @@ class ClipboardManager: ObservableObject {
 
             do {
                 if clipboardAction == .cut {
-                    // Move file
                     try fileSystemService.moveItem(at: sourceURL, to: destinationURL)
                 } else {
-                    // Copy file
                     try fileSystemService.copyItem(at: sourceURL, to: destinationURL)
                 }
+                sourceURLsForHistory.append(sourceURL)
                 succeeded.append(destinationURL)
             } catch {
                 failed.append((sourceURL, error))
             }
         }
 
-        // Clear clipboard if cut operation completed
+        // Record undo action
+        if !succeeded.isEmpty {
+            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                type: actionType == .cut ? .move : .copy,
+                sourceURLs: sourceURLsForHistory,
+                destinationURLs: succeeded
+            ))
+        }
+
         if clipboardAction == .cut && succeeded.count == urls.count {
             clearClipboard()
         }
@@ -111,22 +116,21 @@ class ClipboardManager: ObservableObject {
         }
 
         var succeeded: [URL] = []
+        var sourceURLsForHistory: [URL] = []
         var failed: [(URL, Error)] = []
+        let actionType = clipboardAction
 
         for sourceURL in urls {
             let fileName = sourceURL.lastPathComponent
             var destinationURL = destination.appendingPathComponent(fileName)
 
-            // Handle conflicts
             if fileSystemService.pathExists(destinationURL) {
                 switch conflictResolution {
                 case .skip:
                     continue
                 case .replace:
-                    // Delete existing file first
                     try? fileSystemService.moveToTrash(destinationURL)
                 case .keepBoth:
-                    // Append " copy" to filename
                     destinationURL = generateUniqueURL(for: destinationURL)
                 }
             }
@@ -137,13 +141,21 @@ class ClipboardManager: ObservableObject {
                 } else {
                     try fileSystemService.copyItem(at: sourceURL, to: destinationURL)
                 }
+                sourceURLsForHistory.append(sourceURL)
                 succeeded.append(destinationURL)
             } catch {
                 failed.append((sourceURL, error))
             }
         }
 
-        // Clear clipboard if cut operation completed
+        if !succeeded.isEmpty {
+            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                type: actionType == .cut ? .move : .copy,
+                sourceURLs: sourceURLsForHistory,
+                destinationURLs: succeeded
+            ))
+        }
+
         if clipboardAction == .cut && failed.isEmpty {
             clearClipboard()
         }

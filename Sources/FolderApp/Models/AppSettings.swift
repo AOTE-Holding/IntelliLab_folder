@@ -26,6 +26,9 @@ struct AppSettings: Codable {
     var showColorTagsSection: Bool
     var showGoogleDriveInFavorites: Bool
 
+    // Undo/Redo
+    var undoRedoEnabled: Bool
+
     // Terminal settings
     var defaultTerminal: TerminalApp
     var customTerminalPath: URL?  // nil means use defaultTerminal enum
@@ -84,6 +87,7 @@ struct AppSettings: Codable {
         showRecentSection: true,
         showColorTagsSection: true,
         showGoogleDriveInFavorites: true,
+        undoRedoEnabled: true,
         defaultTerminal: .terminal,
         customTerminalPath: nil
     )
