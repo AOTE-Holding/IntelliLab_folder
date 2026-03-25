@@ -100,6 +100,12 @@ class DraggableView: NSView, NSDraggingSource {
     }
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        if operation == .delete {
+            // Files were dragged to Dock Trash -- move them to trash
+            for url in fileURLs {
+                try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            }
+        }
         isDragging = false
         dragStartPoint = nil
         storedMouseDownEvent = nil

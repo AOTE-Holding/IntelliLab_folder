@@ -47,16 +47,13 @@ struct FileGridView: View {
                             renamingFocusedID: $renamingFocusedID
                         )
                         .overlay {
-                            // Multi-file drag overlay when multiple items selected
-                            if viewModel.selectedItems.count > 1 && viewModel.isSelected(item) {
-                                Color.clear
-                                    .multiFileDrag(
-                                        urls: viewModel.items
-                                            .filter { viewModel.selectedItems.contains($0.id) }
-                                            .map { $0.path },
-                                        enabled: true
-                                    )
-                            }
+                            Color.clear
+                                .multiFileDrag(
+                                    urls: viewModel.isSelected(item)
+                                        ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
+                                        : [item.path],
+                                    enabled: true
+                                )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)

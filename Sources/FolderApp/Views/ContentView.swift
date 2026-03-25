@@ -443,15 +443,13 @@ struct SearchResultsGridView: View {
                 ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
                     FileGridItem(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false, iconSize: CGFloat(fileExplorerViewModel.viewMode.iconSize))
                         .overlay {
-                            if searchViewModel.selectedItems.count > 1 && searchViewModel.isSelected(item) {
-                                Color.clear
-                                    .multiFileDrag(
-                                        urls: searchViewModel.searchResults
-                                            .filter { searchViewModel.selectedItems.contains($0.id) }
-                                            .map { $0.path },
-                                        enabled: true
-                                    )
-                            }
+                            Color.clear
+                                .multiFileDrag(
+                                    urls: searchViewModel.isSelected(item)
+                                        ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }.map { $0.path }
+                                        : [item.path],
+                                    enabled: true
+                                )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)
@@ -510,15 +508,13 @@ struct SearchResultsListView: View {
                 ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
                     FileListRow(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, fileExplorerViewModel: fileExplorerViewModel, isDimmed: false)
                         .overlay {
-                            if searchViewModel.selectedItems.count > 1 && searchViewModel.isSelected(item) {
-                                Color.clear
-                                    .multiFileDrag(
-                                        urls: searchViewModel.searchResults
-                                            .filter { searchViewModel.selectedItems.contains($0.id) }
-                                            .map { $0.path },
-                                        enabled: true
-                                    )
-                            }
+                            Color.clear
+                                .multiFileDrag(
+                                    urls: searchViewModel.isSelected(item)
+                                        ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }.map { $0.path }
+                                        : [item.path],
+                                    enabled: true
+                                )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)
