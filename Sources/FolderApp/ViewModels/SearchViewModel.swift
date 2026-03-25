@@ -149,4 +149,99 @@ class SearchViewModel: ObservableObject {
     func isSelected(_ item: FileSystemItem) -> Bool {
         selectedItems.contains(item.id)
     }
+
+    // MARK: - Navigation Methods
+
+    func selectNextItem() {
+        guard !searchResults.isEmpty else { return }
+        if let first = selectedItems.first,
+           let idx = searchResults.firstIndex(where: { $0.id == first }) {
+            let next = min(idx + 1, searchResults.count - 1)
+            selectedItems = [searchResults[next].id]
+            lastSelectedItem = searchResults[next].id
+        } else {
+            selectedItems = [searchResults[0].id]
+            lastSelectedItem = searchResults[0].id
+        }
+    }
+
+    func selectPreviousItem() {
+        guard !searchResults.isEmpty else { return }
+        if let first = selectedItems.first,
+           let idx = searchResults.firstIndex(where: { $0.id == first }) {
+            let prev = max(idx - 1, 0)
+            selectedItems = [searchResults[prev].id]
+            lastSelectedItem = searchResults[prev].id
+        } else {
+            selectedItems = [searchResults[0].id]
+            lastSelectedItem = searchResults[0].id
+        }
+    }
+
+    func selectItemAbove(columnsPerRow: Int) {
+        guard !searchResults.isEmpty else { return }
+        if let first = selectedItems.first,
+           let idx = searchResults.firstIndex(where: { $0.id == first }) {
+            let prev = max(idx - columnsPerRow, 0)
+            selectedItems = [searchResults[prev].id]
+            lastSelectedItem = searchResults[prev].id
+        } else {
+            selectedItems = [searchResults[0].id]
+            lastSelectedItem = searchResults[0].id
+        }
+    }
+
+    func selectItemBelow(columnsPerRow: Int) {
+        guard !searchResults.isEmpty else { return }
+        if let first = selectedItems.first,
+           let idx = searchResults.firstIndex(where: { $0.id == first }) {
+            let next = min(idx + columnsPerRow, searchResults.count - 1)
+            selectedItems = [searchResults[next].id]
+            lastSelectedItem = searchResults[next].id
+        } else {
+            selectedItems = [searchResults[0].id]
+            lastSelectedItem = searchResults[0].id
+        }
+    }
+
+    func selectAll() {
+        selectedItems = Set(searchResults.map { $0.id })
+    }
+
+    func openSelectedItem(using viewModel: FileExplorerViewModel) {
+        guard let firstID = selectedItems.first,
+              let item = searchResults.first(where: { $0.id == firstID }) else { return }
+        viewModel.openItem(item)
+    }
+
+    // MARK: - File Operations
+
+    func deleteSelectedItems() {
+        let itemsToDelete = searchResults.filter { selectedItems.contains($0.id) }
+        guard !itemsToDelete.isEmpty else { return }
+
+        var sourceURLs: [URL] = []
+        var trashURLs: [URL] = []
+
+        for item in itemsToDelete {
+            var trashNSURL: NSURL?
+            try? FileManager.default.trashItem(at: item.path, resultingItemURL: &trashNSURL)
+            sourceURLs.append(item.path)
+            if let trashURL = trashNSURL as URL? {
+                trashURLs.append(trashURL)
+            }
+        }
+
+        if sourceURLs.count == trashURLs.count && !sourceURLs.isEmpty {
+            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                type: .trash, sourceURLs: sourceURLs, destinationURLs: trashURLs
+            ))
+        }
+
+        // Remove trashed items from search results
+        let trashedPaths = Set(sourceURLs)
+        searchResults.removeAll { trashedPaths.contains($0.path) }
+        selectedItems.removeAll()
+        lastSelectedItem = nil
+    }
 }

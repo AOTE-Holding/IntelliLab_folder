@@ -92,6 +92,14 @@ struct ContentView: View {
 
             Divider()
 
+            // Thin progress bar for background operations
+            if clipboardManager.isProcessing || ActionHistoryManager.shared.isProcessing || viewModel.isProcessing {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                    .tint(Color.folderAccent)
+                    .frame(height: 2)
+            }
+
             // Main Content Area
             if viewModel.isLoading {
                 ProgressView("Loading...")
@@ -229,6 +237,9 @@ struct ContentView: View {
                             try? await Task.sleep(nanoseconds: 100_000_000)
                         }
                         viewModel.refresh()
+                        if searchViewModel.isSearchActive {
+                            searchViewModel.search(in: viewModel.currentPath)
+                        }
                     }
                     return true
                 }
@@ -250,6 +261,18 @@ struct ContentView: View {
                 }
                 return false
 
+            case "a":
+                // Cmd+A: Select all items
+                if !isTextField {
+                    if searchViewModel.isSearchActive && !searchViewModel.searchResults.isEmpty {
+                        searchViewModel.selectAll()
+                    } else {
+                        viewModel.selectAll()
+                    }
+                    return true
+                }
+                return false
+
             default:
                 return false
             }
@@ -262,7 +285,12 @@ struct ContentView: View {
 
         // Handle Delete key (only when not in text field)
         if event.keyCode == 51 { // Delete key
-            viewModel.deleteSelectedItems()
+            if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
+                searchViewModel.deleteSelectedItems()
+                viewModel.refresh()
+            } else {
+                viewModel.deleteSelectedItems()
+            }
             return true
         }
 
@@ -277,16 +305,20 @@ struct ContentView: View {
         // Arrow keys
         case 126: // Up arrow
             if navigationModifierPressed {
-                // Navigation modifier + Up: currently not used
                 return false
             } else if shortcuts.arrowKeysEnabled && !isControlPressed && !isCommandPressed && !isOptionPressed {
-                // Plain arrow keys: navigate between files (if enabled)
-                if viewModel.viewMode.mode == .iconGrid {
-                    // Grid view: navigate to item above
-                    let columnsPerRow = calculateGridColumns()
-                    viewModel.selectItemAbove(columnsPerRow: columnsPerRow)
+                if searchViewModel.isSearchActive && !searchViewModel.searchResults.isEmpty {
+                    if viewModel.viewMode.mode == .iconGrid {
+                        searchViewModel.selectItemAbove(columnsPerRow: calculateGridColumns())
+                    } else {
+                        searchViewModel.selectPreviousItem()
+                    }
                 } else {
-                    viewModel.selectPreviousItem()
+                    if viewModel.viewMode.mode == .iconGrid {
+                        viewModel.selectItemAbove(columnsPerRow: calculateGridColumns())
+                    } else {
+                        viewModel.selectPreviousItem()
+                    }
                 }
                 return true
             }
@@ -294,15 +326,20 @@ struct ContentView: View {
 
         case 125: // Down arrow
             if navigationModifierPressed {
-                // Navigation modifier + Down: currently not used
                 return false
             } else if shortcuts.arrowKeysEnabled && !isControlPressed && !isCommandPressed && !isOptionPressed {
-                // Plain arrow keys: navigate between files (if enabled)
-                if viewModel.viewMode.mode == .iconGrid {
-                    let columnsPerRow = calculateGridColumns()
-                    viewModel.selectItemBelow(columnsPerRow: columnsPerRow)
+                if searchViewModel.isSearchActive && !searchViewModel.searchResults.isEmpty {
+                    if viewModel.viewMode.mode == .iconGrid {
+                        searchViewModel.selectItemBelow(columnsPerRow: calculateGridColumns())
+                    } else {
+                        searchViewModel.selectNextItem()
+                    }
                 } else {
-                    viewModel.selectNextItem()
+                    if viewModel.viewMode.mode == .iconGrid {
+                        viewModel.selectItemBelow(columnsPerRow: calculateGridColumns())
+                    } else {
+                        viewModel.selectNextItem()
+                    }
                 }
                 return true
             }
@@ -310,32 +347,46 @@ struct ContentView: View {
 
         case 123: // Left arrow
             if navigationModifierPressed {
-                // Navigation modifier + Left: Navigate to parent folder
                 viewModel.navigateToParent()
                 return true
             } else if shortcuts.arrowKeysEnabled && !isControlPressed && !isCommandPressed && !isOptionPressed {
-                viewModel.selectPreviousItem()
+                if searchViewModel.isSearchActive && !searchViewModel.searchResults.isEmpty {
+                    searchViewModel.selectPreviousItem()
+                } else {
+                    viewModel.selectPreviousItem()
+                }
                 return true
             }
             return false
 
         case 124: // Right arrow
             if navigationModifierPressed {
-                // Navigation modifier + Right: Navigate into selected folder
-                viewModel.navigateIntoSelectedFolder()
+                navigateIntoSelectedFolder()
                 return true
             } else if shortcuts.arrowKeysEnabled && !isControlPressed && !isCommandPressed && !isOptionPressed {
-                viewModel.selectNextItem()
+                if searchViewModel.isSearchActive && !searchViewModel.searchResults.isEmpty {
+                    searchViewModel.selectNextItem()
+                } else {
+                    viewModel.selectNextItem()
+                }
                 return true
             }
             return false
 
         case 36: // Enter/Return
-            viewModel.openSelectedItem()
+            if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
+                searchViewModel.openSelectedItem(using: viewModel)
+            } else {
+                viewModel.openSelectedItem()
+            }
             return true
 
         case 53: // Escape
-            viewModel.clearSelection()
+            if searchViewModel.isSearchActive {
+                searchViewModel.deactivateSearch()
+            } else {
+                viewModel.clearSelection()
+            }
             return true
 
         case 49: // Space bar - Quick Look
@@ -379,13 +430,23 @@ struct ContentView: View {
     // MARK: - Clipboard Operations
 
     private func copySelectedItems() {
-        let selectedItemsList = viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
+        let selectedItemsList: [FileSystemItem]
+        if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
+            selectedItemsList = searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }
+        } else {
+            selectedItemsList = viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
+        }
         guard !selectedItemsList.isEmpty else { return }
         clipboardManager.copy(items: selectedItemsList)
     }
 
     private func cutSelectedItems() {
-        let selectedItemsList = viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
+        let selectedItemsList: [FileSystemItem]
+        if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
+            selectedItemsList = searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }
+        } else {
+            selectedItemsList = viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
+        }
         guard !selectedItemsList.isEmpty else { return }
         clipboardManager.cut(items: selectedItemsList)
     }
@@ -412,27 +473,38 @@ struct ContentView: View {
     }
 
     private func navigateIntoSelectedFolder() {
-        guard let firstSelected = viewModel.selectedItems.first,
-              let item = viewModel.items.first(where: { $0.id == firstSelected }),
-              item.type == .folder else {
-            return
+        if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
+            guard let firstSelected = searchViewModel.selectedItems.first,
+                  let item = searchViewModel.searchResults.first(where: { $0.id == firstSelected }),
+                  item.type == .folder else { return }
+            viewModel.navigate(to: item.path)
+        } else {
+            guard let firstSelected = viewModel.selectedItems.first,
+                  let item = viewModel.items.first(where: { $0.id == firstSelected }),
+                  item.type == .folder else { return }
+            viewModel.navigate(to: item.path)
         }
-        viewModel.navigate(to: item.path)
     }
 
     // MARK: - File Operations
 
     private func showQuickLook() {
-        guard !viewModel.selectedItems.isEmpty else { return }
+        let items: [FileSystemItem]
+        let selected: Set<UUID>
 
-        // Find the index of the first selected item
-        guard let firstSelectedId = viewModel.selectedItems.first,
-              let startIndex = viewModel.items.firstIndex(where: { $0.id == firstSelectedId }) else {
-            return
+        if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
+            items = searchViewModel.searchResults
+            selected = searchViewModel.selectedItems
+        } else {
+            items = viewModel.items
+            selected = viewModel.selectedItems
         }
 
-        // Pass all items so user can navigate with arrow keys
-        QuickLookManager.shared.showPreview(for: viewModel.items, startingAt: startIndex)
+        guard !selected.isEmpty else { return }
+        guard let firstSelectedId = selected.first,
+              let startIndex = items.firstIndex(where: { $0.id == firstSelectedId }) else { return }
+
+        QuickLookManager.shared.showPreview(for: items, startingAt: startIndex)
     }
 
     private func showNewFolderPrompt() {
@@ -485,12 +557,21 @@ struct SearchResultsGridView: View {
                                     onSingleClick: { _ in handleSearchItemClick(item) },
                                     onDoubleClick: {
                                         fileExplorerViewModel.openItem(item)
-                                        searchViewModel.deactivateSearch()
                                     }
                                 )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)
+                        }
+                        .contextMenu {
+                            FileContextMenu(
+                                item: item,
+                                viewModel: fileExplorerViewModel,
+                                clipboardManager: clipboardManager,
+                                allItems: searchViewModel.searchResults,
+                                selectedItemIDs: searchViewModel.selectedItems,
+                                searchViewModel: searchViewModel
+                            )
                         }
                 }
             }
@@ -500,6 +581,7 @@ struct SearchResultsGridView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
                         searchViewModel.clearSelection()
                     }
             )
@@ -507,10 +589,10 @@ struct SearchResultsGridView: View {
     }
 
     private func handleSearchItemClick(_ item: FileSystemItem) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
         let modifierFlags = NSEvent.modifierFlags
 
         if modifierFlags.contains(.shift) {
-            // Shift+Click: range selection
             if let lastSelected = searchViewModel.lastSelectedItem,
                let lastItem = searchViewModel.searchResults.first(where: { $0.id == lastSelected }) {
                 searchViewModel.selectRange(from: lastItem, to: item)
@@ -518,10 +600,8 @@ struct SearchResultsGridView: View {
                 searchViewModel.toggleSelection(for: item)
             }
         } else if modifierFlags.contains(.command) {
-            // Cmd+Click: toggle selection
             searchViewModel.toggleSelection(for: item)
         } else {
-            // Regular click: select only this item
             searchViewModel.clearSelection()
             searchViewModel.toggleSelection(for: item)
         }
@@ -548,12 +628,21 @@ struct SearchResultsListView: View {
                                     onSingleClick: { _ in handleSearchItemClick(item) },
                                     onDoubleClick: {
                                         fileExplorerViewModel.openItem(item)
-                                        searchViewModel.deactivateSearch()
                                     }
                                 )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)
+                        }
+                        .contextMenu {
+                            FileContextMenu(
+                                item: item,
+                                viewModel: fileExplorerViewModel,
+                                clipboardManager: clipboardManager,
+                                allItems: searchViewModel.searchResults,
+                                selectedItemIDs: searchViewModel.selectedItems,
+                                searchViewModel: searchViewModel
+                            )
                         }
                 }
             }
@@ -563,6 +652,7 @@ struct SearchResultsListView: View {
                 Color.clear
                     .contentShape(Rectangle())
                     .onTapGesture {
+                        NSApp.keyWindow?.makeFirstResponder(nil)
                         searchViewModel.clearSelection()
                     }
             )
@@ -570,10 +660,10 @@ struct SearchResultsListView: View {
     }
 
     private func handleSearchItemClick(_ item: FileSystemItem) {
+        NSApp.keyWindow?.makeFirstResponder(nil)
         let modifierFlags = NSEvent.modifierFlags
 
         if modifierFlags.contains(.shift) {
-            // Shift+Click: range selection
             if let lastSelected = searchViewModel.lastSelectedItem,
                let lastItem = searchViewModel.searchResults.first(where: { $0.id == lastSelected }) {
                 searchViewModel.selectRange(from: lastItem, to: item)
@@ -581,10 +671,8 @@ struct SearchResultsListView: View {
                 searchViewModel.toggleSelection(for: item)
             }
         } else if modifierFlags.contains(.command) {
-            // Cmd+Click: toggle selection
             searchViewModel.toggleSelection(for: item)
         } else {
-            // Regular click: select only this item
             searchViewModel.clearSelection()
             searchViewModel.toggleSelection(for: item)
         }

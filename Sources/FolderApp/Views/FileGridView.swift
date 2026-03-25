@@ -474,10 +474,17 @@ struct FileContextMenu: View {
     let item: FileSystemItem
     @ObservedObject var viewModel: FileExplorerViewModel
     @ObservedObject var clipboardManager: ClipboardManager
+    var allItems: [FileSystemItem]? = nil
+    var selectedItemIDs: Set<UUID>? = nil
+    var searchViewModel: SearchViewModel? = nil
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var settingsManager = SettingsManager.shared
     @State private var showingRenameAlert = false
     @State private var newName = ""
+
+    private var effectiveItems: [FileSystemItem] { allItems ?? viewModel.items }
+    private var effectiveSelectedIDs: Set<UUID> { selectedItemIDs ?? viewModel.selectedItems }
+    private var isItemSelected: Bool { effectiveSelectedIDs.contains(item.id) }
 
     private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "heic", "heif", "webp"]
 
@@ -558,16 +565,16 @@ struct FileContextMenu: View {
 
         Button("Copy") {
             // Copy all selected items if item is in selection, otherwise just this item
-            let itemsToCopy = viewModel.isSelected(item) ?
-                viewModel.items.filter { viewModel.selectedItems.contains($0.id) } :
+            let itemsToCopy = isItemSelected ?
+                effectiveItems.filter { effectiveSelectedIDs.contains($0.id) } :
                 [item]
             clipboardManager.copy(items: itemsToCopy)
         }
 
         Button("Cut") {
             // Cut all selected items if item is in selection, otherwise just this item
-            let itemsToCut = viewModel.isSelected(item) ?
-                viewModel.items.filter { viewModel.selectedItems.contains($0.id) } :
+            let itemsToCut = isItemSelected ?
+                effectiveItems.filter { effectiveSelectedIDs.contains($0.id) } :
                 [item]
             clipboardManager.cut(items: itemsToCut)
         }
@@ -645,8 +652,8 @@ struct FileContextMenu: View {
     }
 
     private func moveToTrash() {
-        let itemsToTrash = viewModel.isSelected(item) ?
-            viewModel.items.filter { viewModel.selectedItems.contains($0.id) } :
+        let itemsToTrash = isItemSelected ?
+            effectiveItems.filter { effectiveSelectedIDs.contains($0.id) } :
             [item]
 
         var sourceURLs: [URL] = []
@@ -667,7 +674,13 @@ struct FileContextMenu: View {
             ))
         }
 
-        viewModel.selectedItems.removeAll()
+        if let search = searchViewModel {
+            let trashedPaths = Set(sourceURLs)
+            search.searchResults.removeAll { trashedPaths.contains($0.path) }
+            search.selectedItems.removeAll()
+        } else {
+            viewModel.selectedItems.removeAll()
+        }
         viewModel.refresh()
     }
 
@@ -784,8 +797,8 @@ struct FileContextMenu: View {
     }
 
     private func duplicateItems() {
-        let items = viewModel.isSelected(item) ?
-            viewModel.items.filter { viewModel.selectedItems.contains($0.id) } : [item]
+        let items = isItemSelected ?
+            effectiveItems.filter { effectiveSelectedIDs.contains($0.id) } : [item]
 
         for duplicateItem in items {
             _ = try? FileSystemService.shared.duplicateItem(at: duplicateItem.path)
@@ -794,8 +807,8 @@ struct FileContextMenu: View {
     }
 
     private func compressItems() {
-        let items = viewModel.isSelected(item) ?
-            viewModel.items.filter { viewModel.selectedItems.contains($0.id) } : [item]
+        let items = isItemSelected ?
+            effectiveItems.filter { effectiveSelectedIDs.contains($0.id) } : [item]
 
         _ = try? FileSystemService.shared.compressItems(at: items.map { $0.path })
         viewModel.refresh()
