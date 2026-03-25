@@ -26,6 +26,7 @@ class ActionHistoryManager: ObservableObject {
 
     @Published var canUndo = false
     @Published var canRedo = false
+    @Published var isProcessing = false
 
     private var undoStack: [FileAction] = []
     private var redoStack: [FileAction] = []
@@ -46,28 +47,40 @@ class ActionHistoryManager: ObservableObject {
 
     func undo() {
         guard settingsManager.settings.undoRedoEnabled,
+              !isProcessing,
               let action = undoStack.popLast() else { return }
 
-        let reversedAction = reverseAction(action)
-        redoStack.append(action)
-        updateState()
+        isProcessing = true
 
-        // If reverse failed, don't keep it in redo
-        if !reversedAction {
-            redoStack.removeLast()
-            updateState()
+        Task.detached(priority: .userInitiated) {
+            let succeeded = Self.reverseAction(action)
+            await MainActor.run {
+                if succeeded {
+                    self.redoStack.append(action)
+                }
+                self.isProcessing = false
+                self.updateState()
+            }
         }
     }
 
     func redo() {
         guard settingsManager.settings.undoRedoEnabled,
+              !isProcessing,
               var action = redoStack.popLast() else { return }
 
-        let succeeded = reExecuteAction(&action)
-        if succeeded {
-            undoStack.append(action)
+        isProcessing = true
+
+        Task.detached(priority: .userInitiated) {
+            let succeeded = Self.reExecuteAction(&action)
+            await MainActor.run {
+                if succeeded {
+                    self.undoStack.append(action)
+                }
+                self.isProcessing = false
+                self.updateState()
+            }
         }
-        updateState()
     }
 
     func clearHistory() {
@@ -81,14 +94,12 @@ class ActionHistoryManager: ObservableObject {
         canRedo = !redoStack.isEmpty && settingsManager.settings.undoRedoEnabled
     }
 
-    /// Reverse an action (undo)
-    @discardableResult
-    private func reverseAction(_ action: FileAction) -> Bool {
+    /// Reverse an action (undo) - runs on background thread
+    private nonisolated static func reverseAction(_ action: FileAction) -> Bool {
         var allSucceeded = true
 
         switch action.type {
         case .trash:
-            // Restore from trash: move files from trashURL back to sourceURL
             for (source, trashDest) in zip(action.sourceURLs, action.destinationURLs) {
                 do {
                     try FileManager.default.moveItem(at: trashDest, to: source)
@@ -98,7 +109,6 @@ class ActionHistoryManager: ObservableObject {
             }
 
         case .copy:
-            // Remove the copies
             for dest in action.destinationURLs {
                 do {
                     try FileManager.default.trashItem(at: dest, resultingItemURL: nil)
@@ -108,7 +118,6 @@ class ActionHistoryManager: ObservableObject {
             }
 
         case .move:
-            // Move files back to original location
             for (source, dest) in zip(action.sourceURLs, action.destinationURLs) {
                 do {
                     try FileManager.default.moveItem(at: dest, to: source)
@@ -121,14 +130,12 @@ class ActionHistoryManager: ObservableObject {
         return allSucceeded
     }
 
-    /// Re-execute an action (redo)
-    @discardableResult
-    private func reExecuteAction(_ action: inout FileAction) -> Bool {
+    /// Re-execute an action (redo) - runs on background thread
+    private nonisolated static func reExecuteAction(_ action: inout FileAction) -> Bool {
         var allSucceeded = true
 
         switch action.type {
         case .trash:
-            // Re-trash the files, capture new trash URLs
             var newTrashURLs: [URL] = []
             for source in action.sourceURLs {
                 do {
@@ -144,7 +151,6 @@ class ActionHistoryManager: ObservableObject {
             }
 
         case .copy:
-            // Re-copy the files
             for (source, dest) in zip(action.sourceURLs, action.destinationURLs) {
                 do {
                     try FileManager.default.copyItem(at: source, to: dest)
@@ -154,7 +160,6 @@ class ActionHistoryManager: ObservableObject {
             }
 
         case .move:
-            // Re-move the files
             for (source, dest) in zip(action.sourceURLs, action.destinationURLs) {
                 do {
                     try FileManager.default.moveItem(at: source, to: dest)

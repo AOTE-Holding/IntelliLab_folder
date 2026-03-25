@@ -14,8 +14,9 @@ class ClipboardManager: ObservableObject {
 
     @Published var clipboardItems: [FileSystemItem] = []
     @Published var clipboardAction: ClipboardAction = .copy
+    @Published var isProcessing = false
 
-    enum ClipboardAction {
+    enum ClipboardAction: Sendable {
         case copy
         case cut
     }
@@ -31,7 +32,6 @@ class ClipboardManager: ObservableObject {
         clipboardItems = items
         clipboardAction = .copy
 
-        // Write URLs to system pasteboard
         let urls = items.map { $0.path as NSURL }
         pasteboard.clearContents()
         pasteboard.writeObjects(urls)
@@ -43,7 +43,6 @@ class ClipboardManager: ObservableObject {
         clipboardItems = items
         clipboardAction = .cut
 
-        // Write URLs to system pasteboard
         let urls = items.map { $0.path as NSURL }
         pasteboard.clearContents()
         pasteboard.writeObjects(urls)
@@ -52,59 +51,76 @@ class ClipboardManager: ObservableObject {
     // MARK: - Paste
 
     func paste(to destination: URL) async throws -> PasteResult {
+        // Read pasteboard on main thread (required by AppKit)
         guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
               !urls.isEmpty else {
             throw ClipboardError.nothingToPaste
         }
 
-        var succeeded: [URL] = []
-        var sourceURLsForHistory: [URL] = []
-        var failed: [(URL, Error)] = []
-        var conflicts: [URL] = []
         let actionType = clipboardAction
+        isProcessing = true
 
-        for sourceURL in urls {
-            let fileName = sourceURL.lastPathComponent
-            var destinationURL = destination.appendingPathComponent(fileName)
+        // Run heavy file I/O on background thread
+        let result: PasteResult = try await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var succeeded: [URL] = []
+            var sourceURLsForHistory: [URL] = []
+            var failed: [(URL, Error)] = []
+            var conflicts: [URL] = []
 
-            let isSameFolder = sourceURL.deletingLastPathComponent() == destination
+            for sourceURL in urls {
+                let fileName = sourceURL.lastPathComponent
+                var destinationURL = destination.appendingPathComponent(fileName)
 
-            if fileSystemService.pathExists(destinationURL) {
-                if isSameFolder && clipboardAction == .copy {
-                    destinationURL = generateUniqueURL(for: destinationURL)
-                } else {
-                    conflicts.append(sourceURL)
-                    continue
+                let isSameFolder = sourceURL.deletingLastPathComponent() == destination
+
+                if fm.fileExists(atPath: destinationURL.path) {
+                    if isSameFolder && actionType == .copy {
+                        destinationURL = Self.generateUniqueURL(for: destinationURL)
+                    } else {
+                        conflicts.append(sourceURL)
+                        continue
+                    }
+                }
+
+                do {
+                    if actionType == .cut {
+                        try fm.moveItem(at: sourceURL, to: destinationURL)
+                    } else {
+                        try fm.copyItem(at: sourceURL, to: destinationURL)
+                    }
+                    sourceURLsForHistory.append(sourceURL)
+                    succeeded.append(destinationURL)
+                } catch {
+                    failed.append((sourceURL, error))
                 }
             }
 
-            do {
-                if clipboardAction == .cut {
-                    try fileSystemService.moveItem(at: sourceURL, to: destinationURL)
-                } else {
-                    try fileSystemService.copyItem(at: sourceURL, to: destinationURL)
-                }
-                sourceURLsForHistory.append(sourceURL)
-                succeeded.append(destinationURL)
-            } catch {
-                failed.append((sourceURL, error))
-            }
-        }
+            return PasteResult(
+                succeeded: succeeded,
+                failed: failed,
+                conflicts: conflicts,
+                sourceURLsForHistory: sourceURLsForHistory,
+                actionType: actionType
+            )
+        }.value
 
-        // Record undo action
-        if !succeeded.isEmpty {
+        isProcessing = false
+
+        // Record undo action on main
+        if !result.succeeded.isEmpty {
             ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                type: actionType == .cut ? .move : .copy,
-                sourceURLs: sourceURLsForHistory,
-                destinationURLs: succeeded
+                type: result.actionType == .cut ? .move : .copy,
+                sourceURLs: result.sourceURLsForHistory,
+                destinationURLs: result.succeeded
             ))
         }
 
-        if clipboardAction == .cut && succeeded.count == urls.count {
+        if clipboardAction == .cut && result.succeeded.count == urls.count {
             clearClipboard()
         }
 
-        return PasteResult(succeeded: succeeded, failed: failed, conflicts: conflicts)
+        return result
     }
 
     // MARK: - Paste with conflict resolution
@@ -115,52 +131,67 @@ class ClipboardManager: ObservableObject {
             throw ClipboardError.nothingToPaste
         }
 
-        var succeeded: [URL] = []
-        var sourceURLsForHistory: [URL] = []
-        var failed: [(URL, Error)] = []
         let actionType = clipboardAction
+        isProcessing = true
 
-        for sourceURL in urls {
-            let fileName = sourceURL.lastPathComponent
-            var destinationURL = destination.appendingPathComponent(fileName)
+        let result: PasteResult = try await Task.detached(priority: .userInitiated) {
+            let fm = FileManager.default
+            var succeeded: [URL] = []
+            var sourceURLsForHistory: [URL] = []
+            var failed: [(URL, Error)] = []
 
-            if fileSystemService.pathExists(destinationURL) {
-                switch conflictResolution {
-                case .skip:
-                    continue
-                case .replace:
-                    try? fileSystemService.moveToTrash(destinationURL)
-                case .keepBoth:
-                    destinationURL = generateUniqueURL(for: destinationURL)
+            for sourceURL in urls {
+                let fileName = sourceURL.lastPathComponent
+                var destinationURL = destination.appendingPathComponent(fileName)
+
+                if fm.fileExists(atPath: destinationURL.path) {
+                    switch conflictResolution {
+                    case .skip:
+                        continue
+                    case .replace:
+                        try? fm.trashItem(at: destinationURL, resultingItemURL: nil)
+                    case .keepBoth:
+                        destinationURL = Self.generateUniqueURL(for: destinationURL)
+                    }
+                }
+
+                do {
+                    if actionType == .cut {
+                        try fm.moveItem(at: sourceURL, to: destinationURL)
+                    } else {
+                        try fm.copyItem(at: sourceURL, to: destinationURL)
+                    }
+                    sourceURLsForHistory.append(sourceURL)
+                    succeeded.append(destinationURL)
+                } catch {
+                    failed.append((sourceURL, error))
                 }
             }
 
-            do {
-                if clipboardAction == .cut {
-                    try fileSystemService.moveItem(at: sourceURL, to: destinationURL)
-                } else {
-                    try fileSystemService.copyItem(at: sourceURL, to: destinationURL)
-                }
-                sourceURLsForHistory.append(sourceURL)
-                succeeded.append(destinationURL)
-            } catch {
-                failed.append((sourceURL, error))
-            }
-        }
+            return PasteResult(
+                succeeded: succeeded,
+                failed: failed,
+                conflicts: [],
+                sourceURLsForHistory: sourceURLsForHistory,
+                actionType: actionType
+            )
+        }.value
 
-        if !succeeded.isEmpty {
+        isProcessing = false
+
+        if !result.succeeded.isEmpty {
             ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                type: actionType == .cut ? .move : .copy,
-                sourceURLs: sourceURLsForHistory,
-                destinationURLs: succeeded
+                type: result.actionType == .cut ? .move : .copy,
+                sourceURLs: result.sourceURLsForHistory,
+                destinationURLs: result.succeeded
             ))
         }
 
-        if clipboardAction == .cut && failed.isEmpty {
+        if clipboardAction == .cut && result.failed.isEmpty {
             clearClipboard()
         }
 
-        return PasteResult(succeeded: succeeded, failed: failed, conflicts: [])
+        return result
     }
 
     // MARK: - Helpers
@@ -174,7 +205,7 @@ class ClipboardManager: ObservableObject {
         pasteboard.clearContents()
     }
 
-    private func generateUniqueURL(for url: URL) -> URL {
+    private nonisolated static func generateUniqueURL(for url: URL) -> URL {
         let directory = url.deletingLastPathComponent()
         let filename = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension
@@ -182,13 +213,11 @@ class ClipboardManager: ObservableObject {
         var counter = 2
         var newURL = url
 
-        while fileSystemService.pathExists(newURL) {
+        while FileManager.default.fileExists(atPath: newURL.path) {
             let newFilename: String
             if ext.isEmpty {
-                // No extension: append (2) to end
                 newFilename = "\(filename) (\(counter))"
             } else {
-                // With extension: insert (2) before extension
                 newFilename = "\(filename) (\(counter)).\(ext)"
             }
             newURL = directory.appendingPathComponent(newFilename)
@@ -201,10 +230,12 @@ class ClipboardManager: ObservableObject {
 
 // MARK: - Supporting Types
 
-struct PasteResult {
+struct PasteResult: Sendable {
     let succeeded: [URL]
-    let failed: [(URL, Error)]
+    let failed: [(URL, any Error)]
     let conflicts: [URL]
+    let sourceURLsForHistory: [URL]
+    let actionType: ClipboardManager.ClipboardAction
 
     var hasConflicts: Bool {
         return !conflicts.isEmpty
@@ -215,7 +246,7 @@ struct PasteResult {
     }
 }
 
-enum ConflictResolution {
+enum ConflictResolution: Sendable {
     case replace
     case keepBoth
     case skip

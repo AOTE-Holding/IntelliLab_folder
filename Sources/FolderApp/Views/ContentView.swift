@@ -31,6 +31,20 @@ struct ContentView: View {
             // Main content area
             mainContentArea
         }
+        .overlay {
+            if clipboardManager.isProcessing || ActionHistoryManager.shared.isProcessing {
+                VStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.8)
+                    Text("Processing...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(16)
+                .background(.ultraThinMaterial)
+                .cornerRadius(12)
+            }
+        }
         .background(Color.folderBase)
         .preferredColorScheme(colorScheme)
         .onAppear {
@@ -204,12 +218,16 @@ struct ContentView: View {
             case "z":
                 if !isTextField {
                     if modifiers.contains(.shift) {
-                        // Cmd+Shift+Z: Redo
                         ActionHistoryManager.shared.redo()
-                        viewModel.refresh()
                     } else {
-                        // Cmd+Z: Undo
                         ActionHistoryManager.shared.undo()
+                    }
+                    // Refresh after background operation completes
+                    Task {
+                        // Wait briefly for the background file op to finish
+                        while ActionHistoryManager.shared.isProcessing {
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                        }
                         viewModel.refresh()
                     }
                     return true
