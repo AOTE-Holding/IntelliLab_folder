@@ -13,75 +13,90 @@ import SwiftUI
 class IconService: ObservableObject {
     static let shared = IconService()
 
-    // Cache for NSImages (path → NSImage)
     private let imageCache = NSCache<NSString, NSImage>()
 
-    // Cache for SwiftUI Images (path → Image ID)
-    @Published private var swiftUICache: [String: String] = [:]
-
     private init() {
-        // Configure cache limits
-        imageCache.countLimit = 500  // Max 500 icons in memory
-        imageCache.totalCostLimit = 50 * 1024 * 1024  // 50MB max
+        imageCache.countLimit = 500
+        imageCache.totalCostLimit = 50 * 1024 * 1024
     }
 
-    /// Get icon for a file or folder
+    /// Get icon synchronously (from cache or workspace). Fast for local drives.
     func icon(for item: FileSystemItem, size: CGFloat = 64) -> NSImage {
         let cacheKey = "\(item.path.path)-\(Int(size))" as NSString
 
-        // Check cache first
         if let cachedImage = imageCache.object(forKey: cacheKey) {
             return cachedImage
         }
 
-        // Load icon from NSWorkspace
         let icon = NSWorkspace.shared.icon(forFile: item.path.path)
-
-        // Resize icon to requested size
         let resizedIcon = resizeImage(icon, to: NSSize(width: size, height: size))
-
-        // Cache it
         imageCache.setObject(resizedIcon, forKey: cacheKey)
-
         return resizedIcon
     }
 
-    /// Get icon as SwiftUI Image
+    /// Get icon as SwiftUI Image (uses cache, falls back to generic icon if not cached yet)
     func swiftUIIcon(for item: FileSystemItem, size: CGFloat = 64) -> Image {
-        let nsImage = icon(for: item, size: size)
-        return Image(nsImage: nsImage)
+        let cacheKey = "\(item.path.path)-\(Int(size))" as NSString
+
+        // If cached, return immediately
+        if let cachedImage = imageCache.object(forKey: cacheKey) {
+            return Image(nsImage: cachedImage)
+        }
+
+        // Return a generic icon immediately, load real one in background
+        let genericIcon: NSImage
+        switch item.type {
+        case .folder:
+            genericIcon = NSWorkspace.shared.icon(for: .folder)
+        case .symlink:
+            genericIcon = NSImage(systemSymbolName: "link", accessibilityDescription: nil) ?? NSImage()
+        case .file:
+            genericIcon = NSWorkspace.shared.icon(for: .item)
+        }
+
+        let resized = resizeImage(genericIcon, to: NSSize(width: size, height: size))
+
+        // Load real icon in background for next render
+        Task.detached(priority: .utility) { [weak self] in
+            let realIcon = NSWorkspace.shared.icon(forFile: item.path.path)
+            await MainActor.run {
+                guard let self = self else { return }
+                let resizedReal = self.resizeImage(realIcon, to: NSSize(width: size, height: size))
+                self.imageCache.setObject(resizedReal, forKey: cacheKey)
+                self.objectWillChange.send()
+            }
+        }
+
+        return Image(nsImage: resized)
     }
 
-    /// Preload icons for an array of items (for performance)
+    /// Preload icons for an array of items
     func preloadIcons(for items: [FileSystemItem], size: CGFloat = 64) {
         Task.detached(priority: .background) {
             for item in items {
                 let cacheKey = "\(item.path.path)-\(Int(size))" as NSString
 
-                // Skip if already cached
                 if await self.imageCache.object(forKey: cacheKey) != nil {
                     continue
                 }
 
-                // Load and cache icon
+                let icon = NSWorkspace.shared.icon(forFile: item.path.path)
                 await MainActor.run {
-                    _ = self.icon(for: item, size: size)
+                    let resized = self.resizeImage(icon, to: NSSize(width: size, height: size))
+                    self.imageCache.setObject(resized, forKey: cacheKey)
                 }
             }
         }
     }
 
-    /// Clear all cached icons
     func clearCache() {
         imageCache.removeAllObjects()
-        swiftUICache.removeAll()
     }
 
-    // MARK: - Private Helpers
+    // MARK: - Private
 
     private func resizeImage(_ image: NSImage, to size: NSSize) -> NSImage {
         let newImage = NSImage(size: size)
-
         newImage.lockFocus()
         image.draw(
             in: NSRect(origin: .zero, size: size),
@@ -90,7 +105,6 @@ class IconService: ObservableObject {
             fraction: 1.0
         )
         newImage.unlockFocus()
-
         return newImage
     }
 }

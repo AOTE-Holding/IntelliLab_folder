@@ -62,11 +62,19 @@ class ThumbnailService: ObservableObject {
 
     /// Generate thumbnail for image files using NSImage
     private func generateImageThumbnail(path: String, size: CGSize) async -> NSImage? {
-        guard let image = NSImage(contentsOfFile: path) else {
-            return nil
+        // Skip files larger than 100MB to avoid loading huge files into memory
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+           let fileSize = attrs[.size] as? Int64,
+           fileSize > 100 * 1024 * 1024 {
+            return await generateQuickLookThumbnail(path: path, size: size)
         }
 
+        // Load and resize image entirely on background thread
         return await Task.detached {
+            guard let image = NSImage(contentsOfFile: path) else {
+                return nil as NSImage?
+            }
+
             let thumbnail = NSImage(size: size)
             thumbnail.lockFocus()
 
@@ -74,14 +82,11 @@ class ThumbnailService: ObservableObject {
             let aspectRatio = imageSize.width / imageSize.height
             var drawRect = CGRect(origin: .zero, size: size)
 
-            // Calculate draw rect to maintain aspect ratio
             if aspectRatio > (size.width / size.height) {
-                // Image is wider
                 let newHeight = size.width / aspectRatio
                 drawRect.origin.y = (size.height - newHeight) / 2
                 drawRect.size.height = newHeight
             } else {
-                // Image is taller
                 let newWidth = size.height * aspectRatio
                 drawRect.origin.x = (size.width - newWidth) / 2
                 drawRect.size.width = newWidth

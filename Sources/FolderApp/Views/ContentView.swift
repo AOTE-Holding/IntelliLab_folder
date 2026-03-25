@@ -32,7 +32,7 @@ struct ContentView: View {
             mainContentArea
         }
         .overlay {
-            if clipboardManager.isProcessing || ActionHistoryManager.shared.isProcessing {
+            if clipboardManager.isProcessing || ActionHistoryManager.shared.isProcessing || viewModel.isProcessing {
                 VStack(spacing: 8) {
                     ProgressView()
                         .scaleEffect(0.8)

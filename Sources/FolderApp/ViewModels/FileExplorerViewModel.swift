@@ -24,6 +24,7 @@ class FileExplorerViewModel: ObservableObject {
     @Published var folderSizes: [URL: Int64] = [:] // Cache folder sizes
     @Published var renamingItem: UUID? // Track which item is being renamed
     @Published var renameText: String = "" // Current text in rename field
+    @Published var isProcessing = false // Background file operation in progress
 
     // Tag filter mode (Finder-like color tag view)
     @Published var tagFilterMode: ColorTag.TagColor? = nil

@@ -239,6 +239,8 @@ struct FileListView: View {
     private func handleDrop(providers: [NSItemProvider], destination: FileSystemItem) -> Bool {
         guard destination.type == .folder else { return false }
 
+        viewModel.isProcessing = true
+
         let group = DispatchGroup()
         let lock = NSLock()
         var allSourceURLs: [URL] = []
@@ -246,7 +248,7 @@ struct FileListView: View {
 
         for provider in providers {
             group.enter()
-            _ = provider.loadObject(ofClass: NSURL.self) { [weak viewModel] object, error in
+            _ = provider.loadObject(ofClass: NSURL.self) { object, error in
                 defer { group.leave() }
                 guard let url = object as? URL, error == nil else { return }
 
@@ -270,6 +272,7 @@ struct FileListView: View {
                     type: .move, sourceURLs: allSourceURLs, destinationURLs: allDestURLs
                 ))
             }
+            viewModel?.isProcessing = false
             viewModel?.refresh()
         }
 
