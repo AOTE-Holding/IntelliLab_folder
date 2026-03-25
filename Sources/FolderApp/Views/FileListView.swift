@@ -28,55 +28,55 @@ struct FileListView: View {
         VStack(spacing: 0) {
             SortingToolbar(viewModel: viewModel)
 
-            List(viewModel.items) { item in
-                FileListRowWithRename(
-                    item: item,
-                    isSelected: viewModel.isSelected(item),
-                    isRenaming: viewModel.renamingItem == item.id,
-                    clipboardManager: clipboardManager,
-                    fileExplorerViewModel: viewModel,
-                    isDimmed: showDimmed,
-                    onSingleClick: { handleSingleClick(item) },
-                    onDoubleClick: { handleDoubleClick(item) },
-                    renamingFocusedID: $renamingFocusedID
-                )
-                .overlay {
-                    Color.clear
-                        .multiFileDrag(
-                            urls: viewModel.isSelected(item)
-                                ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
-                                : [item.path],
-                            enabled: true
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(viewModel.items) { item in
+                        FileListRowWithRename(
+                            item: item,
+                            isSelected: viewModel.isSelected(item),
+                            isRenaming: viewModel.renamingItem == item.id,
+                            clipboardManager: clipboardManager,
+                            fileExplorerViewModel: viewModel,
+                            isDimmed: showDimmed,
+                            onSingleClick: { handleSingleClick(item) },
+                            onDoubleClick: { handleDoubleClick(item) },
+                            renamingFocusedID: $renamingFocusedID
                         )
-                }
-                .onDrag {
-                    NSItemProvider(object: item.path as NSURL)
-                }
-                .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                    handleDrop(providers: providers, destination: item)
-                }
-                .contextMenu {
-                    FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
-                }
-            }
-            .listStyle(.plain)
-            .focusable(true)
-            .scrollContentBackground(.hidden)  // Hide default List background
-            .background(
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        // Clear selection when clicking empty space
-                        viewModel.clearSelection()
-                        // Save scroll position before dismissing
-                        if let currentRenaming = viewModel.renamingItem {
-                            scrollPosition = currentRenaming
+                        .overlay {
+                            Color.clear
+                                .multiFileDrag(
+                                    urls: viewModel.isSelected(item)
+                                        ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
+                                        : [item.path],
+                                    enabled: true
+                                )
                         }
-                        // Dismiss rename mode when clicking empty space
-                        renamingFocusedID = nil
-                        viewModel.commitRename()
+                        .onDrag {
+                            NSItemProvider(object: item.path as NSURL)
+                        }
+                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                            handleDrop(providers: providers, destination: item)
+                        }
+                        .contextMenu {
+                            FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
+                        }
                     }
-            )
+                }
+                .padding(.horizontal)
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
+                .background(
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            viewModel.clearSelection()
+                            if viewModel.renamingItem != nil {
+                                renamingFocusedID = nil
+                                viewModel.commitRename()
+                            }
+                        }
+                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contextMenu {
                 Button("New Folder") {
                     viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
