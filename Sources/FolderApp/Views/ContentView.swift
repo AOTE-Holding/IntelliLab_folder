@@ -463,18 +463,16 @@ struct SearchResultsGridView: View {
                                     urls: searchViewModel.isSelected(item)
                                         ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }.map { $0.path }
                                         : [item.path],
-                                    enabled: true
+                                    enabled: true,
+                                    onSingleClick: { _ in handleSearchItemClick(item) },
+                                    onDoubleClick: {
+                                        fileExplorerViewModel.openItem(item)
+                                        searchViewModel.deactivateSearch()
+                                    }
                                 )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)
-                        }
-                        .onTapGesture(count: 2) {
-                            fileExplorerViewModel.openItem(item)
-                            searchViewModel.deactivateSearch()
-                        }
-                        .onTapGesture {
-                            handleSearchItemClick(item)
                         }
                 }
             }
@@ -528,18 +526,16 @@ struct SearchResultsListView: View {
                                     urls: searchViewModel.isSelected(item)
                                         ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }.map { $0.path }
                                         : [item.path],
-                                    enabled: true
+                                    enabled: true,
+                                    onSingleClick: { _ in handleSearchItemClick(item) },
+                                    onDoubleClick: {
+                                        fileExplorerViewModel.openItem(item)
+                                        searchViewModel.deactivateSearch()
+                                    }
                                 )
                         }
                         .onDrag {
                             NSItemProvider(object: item.path as NSURL)
-                        }
-                        .onTapGesture(count: 2) {
-                            fileExplorerViewModel.openItem(item)
-                            searchViewModel.deactivateSearch()
-                        }
-                        .onTapGesture {
-                            handleSearchItemClick(item)
                         }
                 }
             }

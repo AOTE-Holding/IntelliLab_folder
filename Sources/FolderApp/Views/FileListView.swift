@@ -48,7 +48,9 @@ struct FileListView: View {
                                     urls: viewModel.isSelected(item)
                                         ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
                                         : [item.path],
-                                    enabled: true
+                                    enabled: true,
+                                    onSingleClick: { _ in handleSingleClick(item) },
+                                    onDoubleClick: { handleDoubleClick(item) }
                                 )
                         }
                         .onDrag {
@@ -237,8 +239,15 @@ struct FileListView: View {
     private func handleDrop(providers: [NSItemProvider], destination: FileSystemItem) -> Bool {
         guard destination.type == .folder else { return false }
 
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var allSourceURLs: [URL] = []
+        var allDestURLs: [URL] = []
+
         for provider in providers {
+            group.enter()
             _ = provider.loadObject(ofClass: NSURL.self) { [weak viewModel] object, error in
+                defer { group.leave() }
                 guard let url = object as? URL, error == nil else { return }
 
                 let destinationURL = destination.path.appendingPathComponent(url.lastPathComponent)
@@ -247,16 +256,21 @@ struct FileListView: View {
 
                 do {
                     try FileManager.default.moveItem(at: url, to: destinationURL)
-                    Task { @MainActor in
-                        ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                            type: .move, sourceURLs: [url], destinationURLs: [destinationURL]
-                        ))
-                        viewModel?.refresh()
-                    }
-                } catch {
-                    // Move failed silently
-                }
+                    lock.lock()
+                    allSourceURLs.append(url)
+                    allDestURLs.append(destinationURL)
+                    lock.unlock()
+                } catch {}
             }
+        }
+
+        group.notify(queue: .main) { [weak viewModel] in
+            if !allSourceURLs.isEmpty {
+                ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                    type: .move, sourceURLs: allSourceURLs, destinationURLs: allDestURLs
+                ))
+            }
+            viewModel?.refresh()
         }
 
         return true
