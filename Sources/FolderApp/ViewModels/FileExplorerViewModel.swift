@@ -112,6 +112,20 @@ class FileExplorerViewModel: ObservableObject {
             let showHidden = settingsManager.settings.showHiddenFiles
             let contents = try fileSystemService.contentsOfDirectory(at: currentPath, showHidden: showHidden)
 
+            // Capture previously selected paths BEFORE replacing items
+            // (UUIDs change on every reload, so path is the only stable identity)
+            let previouslySelectedPaths = Set(
+                self.items
+                    .filter { selectedItems.contains($0.id) }
+                    .map { $0.path }
+            )
+
+            // Also capture the last-selected item's path for shift+click range selection
+            let previousLastSelectedPath: URL? = {
+                guard let lastID = lastSelectedItem else { return nil }
+                return self.items.first(where: { $0.id == lastID })?.path
+            }()
+
             // Sort based on current view mode
             self.items = sortItems(contents)
             self.isLoading = false
@@ -119,9 +133,25 @@ class FileExplorerViewModel: ObservableObject {
             // Save as last opened folder
             settingsManager.settings.lastOpenedFolder = currentPath
 
-            // Select first item by default
-            if !items.isEmpty {
-                selectedItems.insert(items[0].id)
+            // Restore selection by matching on path
+            if !previouslySelectedPaths.isEmpty {
+                let restoredIDs = Set(
+                    self.items
+                        .filter { previouslySelectedPaths.contains($0.path) }
+                        .map { $0.id }
+                )
+                selectedItems = restoredIDs
+                selectedItemID = restoredIDs.first
+
+                // Restore lastSelectedItem for shift+click range selection
+                if let lastPath = previousLastSelectedPath {
+                    lastSelectedItem = self.items.first(where: { $0.path == lastPath })?.id
+                }
+            } else if selectedItems.isEmpty && !items.isEmpty {
+                // Only auto-select first item on fresh navigation (no prior selection)
+                selectedItems = [items[0].id]
+                selectedItemID = items[0].id
+                lastSelectedItem = items[0].id
             }
 
             // Calculate folder sizes in background

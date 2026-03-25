@@ -59,7 +59,6 @@ struct FileGridView: View {
                             }
                         }
                         .onDrag {
-                            // Single file drag fallback
                             NSItemProvider(object: item.path as NSURL)
                         }
                         .onDrop(of: [.fileURL], isTargeted: nil) { providers in

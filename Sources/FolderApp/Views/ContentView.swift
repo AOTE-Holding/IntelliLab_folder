@@ -443,7 +443,6 @@ struct SearchResultsGridView: View {
                 ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
                     FileGridItem(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false, iconSize: CGFloat(fileExplorerViewModel.viewMode.iconSize))
                         .overlay {
-                            // Multi-file drag overlay when multiple items selected
                             if searchViewModel.selectedItems.count > 1 && searchViewModel.isSelected(item) {
                                 Color.clear
                                     .multiFileDrag(
@@ -455,7 +454,6 @@ struct SearchResultsGridView: View {
                             }
                         }
                         .onDrag {
-                            // Single file drag fallback
                             NSItemProvider(object: item.path as NSURL)
                         }
                         .onTapGesture(count: 2) {
@@ -512,7 +510,6 @@ struct SearchResultsListView: View {
                 ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
                     FileListRow(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, fileExplorerViewModel: fileExplorerViewModel, isDimmed: false)
                         .overlay {
-                            // Multi-file drag overlay when multiple items selected
                             if searchViewModel.selectedItems.count > 1 && searchViewModel.isSelected(item) {
                                 Color.clear
                                     .multiFileDrag(
@@ -524,7 +521,6 @@ struct SearchResultsListView: View {
                             }
                         }
                         .onDrag {
-                            // Single file drag fallback
                             NSItemProvider(object: item.path as NSURL)
                         }
                         .onTapGesture(count: 2) {

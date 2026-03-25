@@ -3,21 +3,24 @@
 //  Folder
 //
 //  NSViewRepresentable wrapper that enables multi-file drag via AppKit's native drag API
+//  with click-passthrough support so SwiftUI gesture recognizers still work.
 //
 
 import SwiftUI
 import AppKit
 
-/// A transparent NSView that intercepts mouse drags and initiates a multi-file drag session
+/// A transparent NSView that intercepts mouse drags and initiates a multi-file drag session.
+/// Clicks (mouseDown + mouseUp without sufficient drag distance) are forwarded to SwiftUI
+/// by temporarily hiding the overlay and re-sending events to the window.
 class DraggableView: NSView, NSDraggingSource {
     var fileURLs: [URL] = []
     var dragEnabled = false
     private var dragStartPoint: NSPoint?
     private var isDragging = false
+    private var storedMouseDownEvent: NSEvent?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        // Make the view layer-backed for better performance
         wantsLayer = true
     }
 
@@ -30,6 +33,7 @@ class DraggableView: NSView, NSDraggingSource {
         if dragEnabled && !fileURLs.isEmpty {
             dragStartPoint = convert(event.locationInWindow, from: nil)
             isDragging = false
+            storedMouseDownEvent = event
         } else {
             super.mouseDown(with: event)
         }
@@ -49,6 +53,7 @@ class DraggableView: NSView, NSDraggingSource {
         guard distance > 5 else { return }
 
         isDragging = true
+        storedMouseDownEvent = nil // Consumed by drag, don't forward
 
         // Create dragging items for all files
         var draggingItems: [NSDraggingItem] = []
@@ -74,9 +79,18 @@ class DraggableView: NSView, NSDraggingSource {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if !isDragging, let mouseDownEvent = storedMouseDownEvent {
+            // This was a click, not a drag.
+            // Temporarily hide the overlay so the window routes events
+            // to the SwiftUI content underneath.
+            isHidden = true
+            window?.sendEvent(mouseDownEvent)
+            window?.sendEvent(event)
+            isHidden = false
+        }
         dragStartPoint = nil
         isDragging = false
-        super.mouseUp(with: event)
+        storedMouseDownEvent = nil
     }
 
     // MARK: - NSDraggingSource
@@ -88,6 +102,7 @@ class DraggableView: NSView, NSDraggingSource {
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         isDragging = false
         dragStartPoint = nil
+        storedMouseDownEvent = nil
     }
 }
 
