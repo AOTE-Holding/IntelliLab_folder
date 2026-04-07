@@ -5,6 +5,13 @@ set -e  # Exit on error
 
 echo "🔨 Building Folder app..."
 
+# Read version from VERSION file
+APP_VERSION=$(cat VERSION)
+echo "📌 Version: ${APP_VERSION}"
+
+# Generate Version.swift
+echo "let appVersion = \"${APP_VERSION}\"" > Sources/FolderApp/Version.swift
+
 # Clean previous builds
 echo "🧹 Cleaning previous builds..."
 rm -rf .build
@@ -31,7 +38,7 @@ cp ".build/release/Folder" "${MACOS}/${APP_NAME}"
 
 # Create Info.plist
 echo "📄 Creating Info.plist..."
-cat > "${CONTENTS}/Info.plist" << 'EOF'
+cat > "${CONTENTS}/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -51,9 +58,9 @@ cat > "${CONTENTS}/Info.plist" << 'EOF'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>${APP_VERSION}</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>

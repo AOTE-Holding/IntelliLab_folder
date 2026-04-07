@@ -52,7 +52,8 @@ class SwiftUIWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Allow window to close
-        return true
+        // Minimize instead of closing (like Finder)
+        sender.miniaturize(nil)
+        return false
     }
 }

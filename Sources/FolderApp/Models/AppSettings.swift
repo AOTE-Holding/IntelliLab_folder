@@ -73,7 +73,7 @@ struct AppSettings: Codable {
     // Default settings
     static let `default` = AppSettings(
         defaultViewMode: .iconGrid,
-        showHiddenFiles: false,
+        showHiddenFiles: true,
         autoSaveSearchHistory: false,
         lastOpenedFolder: FileManager.default.homeDirectoryForCurrentUser,
         theme: .system,
@@ -84,7 +84,7 @@ struct AppSettings: Codable {
         showMenuBarIcon: true,
         showSidebar: true,
         showFavoritesSection: true,
-        showRecentSection: true,
+        showRecentSection: false,
         showColorTagsSection: true,
         showGoogleDriveInFavorites: true,
         undoRedoEnabled: true,
@@ -125,7 +125,7 @@ struct KeyboardShortcuts: Codable {
         navigationEnabled: Bool = true,
         arrowKeysEnabled: Bool = true,
         searchModifier: KeyModifier = .command,
-        navigationModifier: KeyModifier = .control
+        navigationModifier: KeyModifier = .command
     ) {
         self.searchEnabled = searchEnabled
         self.navigationEnabled = navigationEnabled
@@ -158,8 +158,8 @@ struct GlobalHotkey: Codable {
 
     init(
         enabled: Bool = true,
-        key: String = "space",
-        modifiers: [KeyModifier] = [.command, .shift]
+        key: String = "e",
+        modifiers: [KeyModifier] = [.command]
     ) {
         self.enabled = enabled
         self.key = key

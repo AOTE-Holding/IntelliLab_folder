@@ -44,10 +44,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Add to WindowManager for proper lifecycle management
         WindowManager.shared.addWindowController(mainWindowController!)
+
+        // Check for updates silently on launch
+        Task {
+            await UpdateService.shared.checkForUpdates(silent: true)
+            if UpdateService.shared.updateAvailable {
+                self.showUpdateAlert()
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true  // Quit when main window closes
+        return false  // Keep app running when window is minimized (like Finder)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -183,6 +191,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc func checkForUpdates() {
+        Task { @MainActor in
+            await UpdateService.shared.checkForUpdates(silent: false)
+            if UpdateService.shared.updateAvailable {
+                self.showUpdateAlert()
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "You're up to date!"
+                alert.informativeText = "Folder \(appVersion) is the latest version."
+                alert.runModal()
+            }
+        }
+    }
+
+    @MainActor private func showUpdateAlert() {
+        let service = UpdateService.shared
+        let alert = NSAlert()
+        alert.messageText = "Update Available"
+        alert.informativeText = "Folder \(service.latestVersion) is available (you have \(appVersion)).\n\n\(service.releaseNotes)"
+        alert.addButton(withTitle: "Update Now")
+        alert.addButton(withTitle: "Later")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            Task {
+                await service.downloadAndInstall()
+            }
+        }
+    }
+
     private func setupMenu() {
         let mainMenu = NSMenu()
 
@@ -192,6 +229,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
 
         appMenu.addItem(withTitle: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Folder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
@@ -204,7 +242,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         fileMenu.addItem(withTitle: "New Folder", action: nil, keyEquivalent: "n")
         fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
         mainMenu.addItem(fileMenuItem)
 

@@ -37,5 +37,8 @@ build.db-journal
 .vscode/
 .idea/
 
+# Generated version file
+Sources/FolderApp/Version.swift
+
 # Temporary files
 *.tmp

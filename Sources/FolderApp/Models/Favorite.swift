@@ -35,8 +35,6 @@ struct ColorTag: Codable, Equatable, Hashable {
         case teal = "#009880"
         case blue = "#007AFF"
         case purple = "#AF52DE"
-        case pink = "#FF6B9D"
-        case gray = "#8E8E93"
 
         var displayName: String {
             switch self {
@@ -47,8 +45,6 @@ struct ColorTag: Codable, Equatable, Hashable {
             case .teal: return "Teal"
             case .blue: return "Blue"
             case .purple: return "Purple"
-            case .pink: return "Pink"
-            case .gray: return "Gray"
             }
         }
     }

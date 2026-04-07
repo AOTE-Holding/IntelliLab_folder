@@ -713,8 +713,6 @@ struct FileContextMenu: View {
         case .teal: return "Teal"
         case .blue: return "Blue"
         case .purple: return "Purple"
-        case .pink: return "Pink"
-        case .gray: return "Gray"
         }
     }
 

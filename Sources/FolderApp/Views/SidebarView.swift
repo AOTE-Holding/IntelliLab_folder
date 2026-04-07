@@ -146,32 +146,21 @@ struct SidebarView: View {
             // Color Tags Section - Shows color categories like Finder
             if settingsManager.settings.showColorTagsSection {
                 SidebarSection(title: "Tags") {
-                    // Get used colors (colors that have at least one tagged item)
-                    let usedColors = Set(sidebarManager.colorTags.values.map { $0.color })
-                    let sortedColors = ColorTag.TagColor.allCases.filter { usedColors.contains($0) }
-
-                    ForEach(sortedColors, id: \.self) { color in
+                    ForEach(ColorTag.TagColor.allCases, id: \.self) { color in
                         let count = sidebarManager.colorTags.filter { $0.value.color == color }.count
                         SidebarTagCategoryItem(
                             color: color,
                             count: count,
                             isSelected: fileExplorerViewModel.tagFilterMode == color
                         ) {
-                            // Exit filter mode if clicking the same tag, otherwise show files with this tag
-                            if fileExplorerViewModel.tagFilterMode == color {
-                                fileExplorerViewModel.exitTagFilterMode()
-                            } else {
-                                fileExplorerViewModel.showFilesWithTag(color)
+                            if count > 0 {
+                                if fileExplorerViewModel.tagFilterMode == color {
+                                    fileExplorerViewModel.exitTagFilterMode()
+                                } else {
+                                    fileExplorerViewModel.showFilesWithTag(color)
+                                }
                             }
                         }
-                    }
-
-                    if sortedColors.isEmpty {
-                        Text("No tagged items")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 4)
                     }
                 }
             }
@@ -392,8 +381,6 @@ struct SidebarFavoriteItem: View {
         case .teal: return "Teal"
         case .blue: return "Blue"
         case .purple: return "Purple"
-        case .pink: return "Pink"
-        case .gray: return "Gray"
         }
     }
 }
@@ -419,14 +406,20 @@ struct SidebarTagCategoryItem: View {
 
                 Text(color.displayName)
                     .font(.system(size: 13))
-                    .foregroundColor(isSelected ? .primary : .primary)
+                    .foregroundColor(count > 0 ? .primary : .secondary)
                     .lineLimit(1)
 
                 Spacer()
 
-                Text("\(count)")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Right-click to tag")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.6))
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -528,8 +521,6 @@ struct SidebarColorTagItem: View {
         case .teal: return "Teal"
         case .blue: return "Blue"
         case .purple: return "Purple"
-        case .pink: return "Pink"
-        case .gray: return "Gray"
         }
     }
 }
