@@ -106,7 +106,6 @@ struct SidebarView: View {
                     SidebarItem(
                         icon: "clock.fill",
                         title: location.lastPathComponent,
-                        subtitle: location.deletingLastPathComponent().path,
                         isSelected: fileExplorerViewModel.currentPath == location
                     ) {
                         fileExplorerViewModel.navigate(to: location)

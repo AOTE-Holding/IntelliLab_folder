@@ -52,8 +52,11 @@ class SwiftUIWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Minimize instead of closing (like Finder)
-        sender.miniaturize(nil)
-        return false
+        // Only minimize the main window (like Finder); let other windows close normally
+        if sender.title == "Folder" {
+            sender.miniaturize(nil)
+            return false
+        }
+        return true
     }
 }
