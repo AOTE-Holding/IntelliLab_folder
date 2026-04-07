@@ -170,6 +170,7 @@ class UpdateService: NSObject, ObservableObject {
         rm -rf "\(installPath)"
         cp -R "\(newAppURL.path)" "\(installPath)"
         xattr -cr "\(installPath)"
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "\(installPath)"
         open "\(installPath)"
         rm -f "\(scriptPath.path)"
         """
