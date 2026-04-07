@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-14
@@ -31,5 +34,12 @@ jobs:
         with:
           files: Folder.app.zip
           generate_release_notes: true
+          body: |
+            ## Install
+            1. Download `Folder.app.zip` below
+            2. Unzip and drag `Folder.app` to `/Applications`
+            3. Open Folder — it will auto-update from now on
+
+            ## What's in this release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
