@@ -58,12 +58,12 @@ class IconService: ObservableObject {
 
         // Load real icon in background for next render
         Task.detached(priority: .utility) { [weak self] in
+            guard let strongSelf = self else { return }
             let realIcon = NSWorkspace.shared.icon(forFile: item.path.path)
             await MainActor.run {
-                guard let self = self else { return }
-                let resizedReal = self.resizeImage(realIcon, to: NSSize(width: size, height: size))
-                self.imageCache.setObject(resizedReal, forKey: cacheKey)
-                self.objectWillChange.send()
+                let resizedReal = strongSelf.resizeImage(realIcon, to: NSSize(width: size, height: size))
+                strongSelf.imageCache.setObject(resizedReal, forKey: cacheKey)
+                strongSelf.objectWillChange.send()
             }
         }
 

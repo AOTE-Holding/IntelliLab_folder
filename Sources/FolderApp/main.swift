@@ -129,8 +129,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            guard let strongSelf = self else { return }
             Task { @MainActor in
-                self?.updateStatusBarVisibility()
+                strongSelf.updateStatusBarVisibility()
             }
         }
 
@@ -164,8 +165,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            guard let strongSelf = self else { return }
             Task { @MainActor in
-                self?.updateGlobalHotkey()
+                strongSelf.updateGlobalHotkey()
             }
         }
 
