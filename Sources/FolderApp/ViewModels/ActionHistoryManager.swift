@@ -74,9 +74,10 @@ class ActionHistoryManager: ObservableObject {
         Task.detached(priority: .userInitiated) {
             var mutableAction = action
             let succeeded = Self.reExecuteAction(&mutableAction)
+            let resultAction = mutableAction
             await MainActor.run {
                 if succeeded {
-                    self.undoStack.append(mutableAction)
+                    self.undoStack.append(resultAction)
                 }
                 self.isProcessing = false
                 self.updateState()
