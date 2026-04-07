@@ -67,15 +67,16 @@ class ActionHistoryManager: ObservableObject {
     func redo() {
         guard settingsManager.settings.undoRedoEnabled,
               !isProcessing,
-              var action = redoStack.popLast() else { return }
+              let action = redoStack.popLast() else { return }
 
         isProcessing = true
 
         Task.detached(priority: .userInitiated) {
-            let succeeded = Self.reExecuteAction(&action)
+            var mutableAction = action
+            let succeeded = Self.reExecuteAction(&mutableAction)
             await MainActor.run {
                 if succeeded {
-                    self.undoStack.append(action)
+                    self.undoStack.append(mutableAction)
                 }
                 self.isProcessing = false
                 self.updateState()
