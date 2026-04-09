@@ -484,15 +484,26 @@ class FileExplorerViewModel: ObservableObject {
             }
         }
 
+        // Resolve unique name if folder already exists
+        var finalName = name
+        let fm = FileManager.default
+        if fm.fileExists(atPath: currentPath.appendingPathComponent(name).path) {
+            var counter = 2
+            while fm.fileExists(atPath: currentPath.appendingPathComponent("\(name) (\(counter))").path) {
+                counter += 1
+            }
+            finalName = "\(name) (\(counter))"
+        }
+
         do {
-            try fileSystemService.createFolder(at: currentPath, named: name)
+            try fileSystemService.createFolder(at: currentPath, named: finalName)
 
             if autoRename {
                 // Refresh to get the new folder, then start renaming it
                 Task {
                     await loadContents()
                     // Find the newly created folder
-                    if let newFolder = items.first(where: { $0.name == name && $0.type == .folder }) {
+                    if let newFolder = items.first(where: { $0.name == finalName && $0.type == .folder }) {
                         startRenaming(newFolder)
                     }
                 }

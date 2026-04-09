@@ -14,7 +14,7 @@ echo "let appVersion = \"${APP_VERSION}\"" > Sources/FolderApp/Version.swift
 
 # Clean previous builds
 echo "🧹 Cleaning previous builds..."
-rm -rf .build
+rm -rf .build 2>/dev/null || true
 rm -rf Folder.app
 
 # Build with Swift Package Manager
