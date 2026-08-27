@@ -7,20 +7,28 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
+
+private final class ListClickTracker {
+    var lastClickedItem: UUID?
+    var lastClickTime: Date?
+}
 
 struct FileListView: View {
     @ObservedObject var viewModel: FileExplorerViewModel
     @ObservedObject var searchViewModel: SearchViewModel
     @StateObject private var clipboardManager = ClipboardManager.shared
     @StateObject private var settingsManager = SettingsManager.shared
+    @StateObject private var operationCoordinator = FileOperationCoordinator.shared
     let showDimmed: Bool
 
     @State private var showingNewFolderAlert = false
     @State private var newFolderName = ""
-    @State private var lastClickedItem: UUID?
-    @State private var lastClickTime: Date?
+    @State private var clickTracker = ListClickTracker()
     @FocusState private var renamingFocusedID: UUID?
     @State private var scrollPosition: UUID?
+    @State private var springLoadedItemID: UUID?
+    @State private var springLoadGeneration = 0
 
     private let clickPauseInterval: TimeInterval = 0.5
 
@@ -28,13 +36,14 @@ struct FileListView: View {
         VStack(spacing: 0) {
             SortingToolbar(viewModel: viewModel)
 
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(viewModel.items) { item in
+            GeometryReader { geometry in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(viewModel.items) { item in
                         FileListRowWithRename(
                             item: item,
                             isSelected: viewModel.isSelected(item),
-                            isRenaming: viewModel.renamingItem == item.id,
+                            isRenaming: false,
                             clipboardManager: clipboardManager,
                             fileExplorerViewModel: viewModel,
                             isDimmed: showDimmed,
@@ -43,114 +52,134 @@ struct FileListView: View {
                             renamingFocusedID: $renamingFocusedID
                         )
                         .overlay {
-                            Color.clear
-                                .multiFileDrag(
-                                    urls: viewModel.isSelected(item)
-                                        ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
-                                        : [item.path],
-                                    enabled: true,
-                                    onSingleClick: { _ in handleSingleClick(item) },
-                                    onDoubleClick: { handleDoubleClick(item) }
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.18 : 0))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.85 : 0), lineWidth: 1.5)
+                                )
+                                .allowsHitTesting(false)
+                                .animation(
+                                    springLoadedItemID == item.id
+                                        ? .easeInOut(duration: 0.38).repeatForever(autoreverses: true)
+                                        : .easeOut(duration: 0.12),
+                                    value: springLoadedItemID == item.id
                                 )
                         }
-                        .onDrag {
-                            NSItemProvider(object: item.path as NSURL)
-                        }
-                        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                            handleDrop(providers: providers, destination: item)
+                        .overlay {
+                            Color.clear.multiFileDrag(
+                                urls: viewModel.isSelected(item)
+                                    ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
+                                    : [item.path],
+                                enabled: true,
+                                dropDestination: item.type == .folder ? item.path : nil,
+                                onDropFiles: { sources, forceCopy in
+                                    endSpringLoading(item)
+                                    operationCoordinator.drop(sources, into: item.path, forceCopy: forceCopy)
+                                },
+                                onDragEntered: { beginSpringLoading(item) },
+                                onDragExited: { endSpringLoading(item) },
+                                onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
+                                onDoubleClick: { handleDoubleClick(item) }
+                            )
                         }
                         .contextMenu {
                             FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
                         }
-                    }
-                }
-                .padding(.horizontal)
-                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
-                .background(
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            viewModel.clearSelection()
-                            if viewModel.renamingItem != nil {
-                                renamingFocusedID = nil
-                                viewModel.commitRename()
-                            }
                         }
-                )
+                    }
+                    .padding(.horizontal)
+                    // A ScrollView sizes its content to the files it contains.
+                    // Match the visible height so clicks below the last file
+                    // still land in this background and clear the selection.
+                    .frame(minWidth: 0, maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
+                    .background(
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .overlay {
+                                ImmediateBackgroundClickView(action: viewModel.clearSelection)
+                            }
+                    )
+                }
+                .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+                    dropFilesIntoCurrentFolder(providers)
+                }
+                .contextMenu {
+                    Button("New Folder") {
+                        viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
+                    }
+
+                    Divider()
+
+                    Button("Open Command Line Here") {
+                        openTerminal(at: viewModel.currentPath)
+                    }
+
+                    Divider()
+
+                    Button("Paste") {
+                        operationCoordinator.paste(to: viewModel.currentPath)
+                    }
+                    .disabled(!clipboardManager.hasClipboardContent())
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .contextMenu {
-                Button("New Folder") {
-                    viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
-                }
-
-                Divider()
-
-                Button("Open Terminal Here") {
-                    openTerminal(at: viewModel.currentPath)
-                }
-
-                Divider()
-
-                Button("Paste") {
-                    Task {
-                        _ = try? await clipboardManager.paste(to: viewModel.currentPath)
-                        viewModel.refresh()
-                    }
-                }
-                .disabled(!clipboardManager.hasClipboardContent())
-            }
         }
         .onDeleteCommand {
             viewModel.deleteSelectedItems()
         }
     }
 
+    private func dropFilesIntoCurrentFolder(_ providers: [NSItemProvider]) -> Bool {
+        let group = DispatchGroup()
+        let accumulator = LockedURLAccumulator()
+
+        for provider in providers {
+            group.enter()
+            _ = provider.loadObject(ofClass: NSURL.self) { object, error in
+                defer { group.leave() }
+                guard let url = object as? URL, error == nil else { return }
+                accumulator.append(url)
+            }
+        }
+
+        let forceCopy = NSEvent.modifierFlags.contains(.option)
+        group.notify(queue: .main) {
+            let sources = accumulator.snapshot()
+            guard !sources.isEmpty else { return }
+            operationCoordinator.drop(sources, into: viewModel.currentPath, forceCopy: forceCopy)
+        }
+        return true
+    }
+
+    private func beginSpringLoading(_ item: FileSystemItem) {
+        guard item.type == .folder else { return }
+
+        springLoadGeneration += 1
+        let generation = springLoadGeneration
+        withAnimation(.easeInOut(duration: 0.16)) {
+            springLoadedItemID = item.id
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard generation == springLoadGeneration,
+                  springLoadedItemID == item.id else { return }
+            viewModel.navigate(to: item.path)
+            springLoadedItemID = nil
+        }
+    }
+
+    private func endSpringLoading(_ item: FileSystemItem) {
+        guard springLoadedItemID == item.id else { return }
+        springLoadGeneration += 1
+        withAnimation(.easeOut(duration: 0.12)) {
+            springLoadedItemID = nil
+        }
+    }
+
     private func openTerminal(at path: URL) {
-        // Check for custom terminal path first
-        if let customTerminalPath = settingsManager.settings.customTerminalPath {
-            openCustomTerminal(customTerminalPath, at: path)
-            return
-        }
-
-        let terminal = settingsManager.settings.defaultTerminal
-
-        switch terminal {
-        case .terminal, .iterm2:
-            // Use AppleScript for Terminal.app and iTerm2
-            let appName = terminal == .terminal ? "Terminal" : "iTerm"
-            let script = """
-                tell application "\(appName)"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-
-        case .warp:
-            // Warp uses URL scheme
-            if let url = URL(string: "warp://action/new_tab?path=\(path.path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path.path)") {
-                NSWorkspace.shared.open(url)
-            }
-
-        case .kitty:
-            // Launch kitty with --directory argument
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/Applications/kitty.app/Contents/MacOS/kitty")
-            process.arguments = ["--directory", path.path]
-            try? process.run()
-
-        case .alacritty:
-            // Launch alacritty with --working-directory argument
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/Applications/Alacritty.app/Contents/MacOS/alacritty")
-            process.arguments = ["--working-directory", path.path]
-            try? process.run()
-        }
+        CommandLineLauncher.shared.open(at: path, settings: settingsManager.settings)
     }
 
     private func openCustomTerminal(_ terminalURL: URL, at path: URL) {
@@ -184,30 +213,10 @@ struct FileListView: View {
         }
     }
 
-    private func handleSingleClick(_ item: FileSystemItem) {
-        let modifierFlags = NSEvent.modifierFlags
-        let now = Date()
-
-        // Check for Finder-style click-pause-click rename pattern
-        if !modifierFlags.contains(.shift) && !modifierFlags.contains(.command),
-           lastClickedItem == item.id,
-           let lastTime = lastClickTime,
-           now.timeIntervalSince(lastTime) >= clickPauseInterval && now.timeIntervalSince(lastTime) <= 2.0,
-           viewModel.isSelected(item) {
-            // Second click on same item after pause - enter rename mode
-            viewModel.startRenaming(item)
-            renamingFocusedID = item.id
-            lastClickedItem = nil
-            lastClickTime = nil
-            return
-        }
-
-        // Dismiss any active rename mode when clicking a different item
-        if viewModel.renamingItem != nil && viewModel.renamingItem != item.id {
-            renamingFocusedID = nil
-            viewModel.commitRename()
-        }
-
+    private func handleSingleClick(
+        _ item: FileSystemItem,
+        modifiers modifierFlags: NSEvent.ModifierFlags = NSEvent.modifierFlags
+    ) {
         // Handle selection
         if modifierFlags.contains(.shift) {
             // Shift+Click: range selection
@@ -222,61 +231,15 @@ struct FileListView: View {
             viewModel.toggleSelection(for: item)
         } else {
             // Regular click: select only this item
-            viewModel.clearSelection()
-            viewModel.toggleSelection(for: item)
+            viewModel.selectOnly(item)
+            QuickLookManager.shared.selectVisiblePreviewItem(at: item.path)
         }
 
-        // Track click for rename detection
-        lastClickedItem = item.id
-        lastClickTime = now
     }
 
     private func handleDoubleClick(_ item: FileSystemItem) {
         // Double click: open item
         viewModel.openItem(item)
-    }
-
-    private func handleDrop(providers: [NSItemProvider], destination: FileSystemItem) -> Bool {
-        guard destination.type == .folder else { return false }
-
-        viewModel.isProcessing = true
-
-        let group = DispatchGroup()
-        let lock = NSLock()
-        var allSourceURLs: [URL] = []
-        var allDestURLs: [URL] = []
-
-        for provider in providers {
-            group.enter()
-            _ = provider.loadObject(ofClass: NSURL.self) { object, error in
-                defer { group.leave() }
-                guard let url = object as? URL, error == nil else { return }
-
-                let destinationURL = destination.path.appendingPathComponent(url.lastPathComponent)
-                guard url != destinationURL else { return }
-                guard !FileManager.default.fileExists(atPath: destinationURL.path) else { return }
-
-                do {
-                    try FileManager.default.moveItem(at: url, to: destinationURL)
-                    lock.lock()
-                    allSourceURLs.append(url)
-                    allDestURLs.append(destinationURL)
-                    lock.unlock()
-                } catch {}
-            }
-        }
-
-        group.notify(queue: .main) { [weak viewModel] in
-            if !allSourceURLs.isEmpty {
-                ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                    type: .move, sourceURLs: allSourceURLs, destinationURLs: allDestURLs
-                ))
-            }
-            viewModel?.isProcessing = false
-            viewModel?.refresh()
-        }
-
-        return true
     }
 
 }
@@ -357,12 +320,6 @@ struct FileListRowWithRename: View {
                 fileExplorerViewModel: fileExplorerViewModel,
                 isDimmed: isDimmed
             )
-            .onTapGesture(count: 2) {
-                onDoubleClick()
-            }
-            .onTapGesture {
-                onSingleClick()
-            }
         }
     }
 }
@@ -385,6 +342,10 @@ struct FileListRow: View {
 
     private var colorTag: ColorTag? {
         sidebarManager.getColorTag(for: item.path)
+    }
+
+    private var quickLookTransitionImage: NSImage {
+        thumbnail ?? iconService.icon(for: item, size: 20)
     }
 
     private var opacity: Double {
@@ -435,6 +396,12 @@ struct FileListRow: View {
                         .offset(x: 2, y: -2)
                 }
             }
+            .background(
+                QuickLookSourceAnchor(
+                    url: item.path,
+                    transitionImage: quickLookTransitionImage
+                )
+            )
 
             // Name
             Text(item.name)

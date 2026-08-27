@@ -27,10 +27,16 @@ struct SearchBarView: View {
                         searchViewModel.search(in: fileExplorerViewModel.currentPath)
                     }
 
-                if searchViewModel.isSearching {
-                    ProgressView()
-                        .scaleEffect(0.7)
+                // Reserve this space permanently so starting a search never
+                // changes the search bar's layout.
+                ZStack {
+                    if searchViewModel.isSearching {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Searching")
+                    }
                 }
+                .frame(width: 16, height: 16)
 
                 if !searchViewModel.searchQuery.isEmpty {
                     Button(action: { searchViewModel.clearSearch() }) {

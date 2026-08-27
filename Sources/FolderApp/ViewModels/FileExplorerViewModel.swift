@@ -17,10 +17,14 @@ class FileExplorerViewModel: ObservableObject {
     @Published var items: [FileSystemItem] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// True only when the last directory read failed because macOS denied
+    /// access. Other failures (an ejected drive, offline share, etc.) must
+    /// not turn into another permission prompt.
+    @Published private(set) var requiresPermission = false
     @Published var viewMode: ViewMode = .default
-    @Published var selectedItemID: UUID? // Single selection for performance
+    var selectedItemID: UUID? // Derived selection detail; selectedItems drives UI
     @Published var selectedItems: Set<UUID> = [] // Multi-selection support
-    @Published var lastSelectedItem: UUID? // Track last selected item for range selection
+    var lastSelectedItem: UUID? // Interaction anchor; does not drive rendering
     @Published var folderSizes: [URL: Int64] = [:] // Cache folder sizes
     @Published var renamingItem: UUID? // Track which item is being renamed
     @Published var renameText: String = "" // Current text in rename field
@@ -34,13 +38,13 @@ class FileExplorerViewModel: ObservableObject {
     @Published var canGoBack = false
     @Published var canGoForward = false
 
-    private var navigationHistory: [URL] = []
-    private var currentHistoryIndex = -1
+    private var navigationHistory: NavigationHistory
 
     // Services
     private let fileSystemService = FileSystemService.shared
     private let settingsManager = SettingsManager.shared
     private let fileWatcher = FileSystemWatcher()
+    private var loadGeneration = 0
 
     // Combine subscriptions
     private var cancellables = Set<AnyCancellable>()
@@ -48,22 +52,25 @@ class FileExplorerViewModel: ObservableObject {
     // MARK: - Initialization
 
     init(initialPath: URL? = nil) {
+        let startingPath: URL
+
         // Start at home directory or last opened folder
         if let path = initialPath {
-            // Validate it's a directory
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: path.path, isDirectory: &isDirectory),
-               isDirectory.boolValue {
-                self.currentPath = path
-            } else {
-                // If file path provided, use parent directory
-                self.currentPath = path.deletingLastPathComponent()
-            }
+            // Validation happens with the directory read on the worker. A
+            // synchronous metadata probe here stalls window construction on
+            // cloud, network and sleeping external volumes.
+            startingPath = path
         } else if let path = settingsManager.settings.lastOpenedFolder {
-            self.currentPath = path
+            startingPath = path
         } else {
-            self.currentPath = fileSystemService.homeDirectory()
+            startingPath = fileSystemService.homeDirectory()
         }
+
+        self.currentPath = startingPath
+        self.navigationHistory = NavigationHistory(initialURL: startingPath)
+        self.viewMode.mode = settingsManager.settings.defaultViewMode == .iconGrid ? .iconGrid : .list
+        self.viewMode.iconSize = settingsManager.settings.iconSize
+        updateNavigationState()
 
         // Subscribe to file system changes
         setupFileWatcher()
@@ -84,7 +91,7 @@ class FileExplorerViewModel: ObservableObject {
 
                 // Auto-refresh when changes detected
                 Task {
-                    await self.loadContents()
+                    await self.loadContents(showLoadingIndicator: false)
                 }
 
                 // Reset the flag
@@ -95,23 +102,29 @@ class FileExplorerViewModel: ObservableObject {
 
     // MARK: - Directory Loading
 
-    func loadContents() async {
-        isLoading = true
-        errorMessage = nil
-
-        // Validate path is a directory
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: currentPath.path, isDirectory: &isDirectory),
-              isDirectory.boolValue else {
-            self.errorMessage = "Invalid path: Not a directory"
-            self.items = []
-            self.isLoading = false
-            return
+    func loadContents(showLoadingIndicator: Bool = true) async {
+        loadGeneration += 1
+        let generation = loadGeneration
+        let requestedPath = currentPath
+        if showLoadingIndicator {
+            isLoading = true
         }
+        errorMessage = nil
+        requiresPermission = false
 
         do {
+            // Resolve any stored security-scoped bookmark for the current
+            // folder and start/stop access around the directory read.
+            let access = PermissionCenter.shared.beginAccess(to: requestedPath)
+            defer { access?.stop() }
+            let readablePath = access?.url ?? requestedPath
             let showHidden = settingsManager.settings.showHiddenFiles
-            let contents = try fileSystemService.contentsOfDirectory(at: currentPath, showHidden: showHidden)
+            let service = fileSystemService
+            let contents = try await Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                return try service.contentsOfDirectory(at: readablePath, showHidden: showHidden)
+            }.value
+            guard generation == loadGeneration, requestedPath == currentPath else { return }
 
             // Capture previously selected paths BEFORE replacing items
             // (UUIDs change on every reload, so path is the only stable identity)
@@ -127,12 +140,29 @@ class FileExplorerViewModel: ObservableObject {
                 return self.items.first(where: { $0.id == lastID })?.path
             }()
 
-            // Sort based on current view mode
-            self.items = sortItems(contents)
+            // Preserve identity for unchanged paths. FileSystemItem's normal
+            // initializer creates a UUID, which made every watcher refresh
+            // look like a completely new directory to SwiftUI.
+            let existingIDs = Dictionary(
+                uniqueKeysWithValues: self.items.map { ($0.path.standardizedFileURL, $0.id) }
+            )
+            let identityStableContents = contents.map { item in
+                guard let stableID = existingIDs[item.path.standardizedFileURL] else { return item }
+                return item.preservingIdentity(stableID)
+            }
+
+            // Sort based on current view mode and publish only a real change.
+            let sortedContents = sortItems(identityStableContents)
+            if self.items != sortedContents {
+                self.items = sortedContents
+            }
             self.isLoading = false
+            self.requiresPermission = false
 
             // Save as last opened folder
-            settingsManager.settings.lastOpenedFolder = currentPath
+            if settingsManager.settings.lastOpenedFolder != currentPath {
+                settingsManager.settings.lastOpenedFolder = currentPath
+            }
 
             // Restore selection by matching on path
             if !previouslySelectedPaths.isEmpty {
@@ -148,22 +178,15 @@ class FileExplorerViewModel: ObservableObject {
                 if let lastPath = previousLastSelectedPath {
                     lastSelectedItem = self.items.first(where: { $0.path == lastPath })?.id
                 }
-            } else if selectedItems.isEmpty && !items.isEmpty {
-                // Only auto-select first item on fresh navigation (no prior selection)
-                selectedItems = [items[0].id]
-                selectedItemID = items[0].id
-                lastSelectedItem = items[0].id
-            }
-
-            // Calculate folder sizes in background
-            Task.detached(priority: .background) { [weak self] in
-                await self?.calculateFolderSizes(for: contents.filter { $0.type == .folder })
             }
 
             // Start watching the current directory for changes
-            fileWatcher.startWatching(url: currentPath)
+            fileWatcher.startWatching(url: requestedPath)
+            QuickLookManager.shared.prewarmPreviewCache(for: self.items, in: requestedPath)
         } catch {
+            guard generation == loadGeneration else { return }
             self.errorMessage = "Failed to load directory: \(error.localizedDescription)"
+            self.requiresPermission = Self.isPermissionDenied(error)
             self.items = []
             self.isLoading = false
 
@@ -172,20 +195,32 @@ class FileExplorerViewModel: ObservableObject {
         }
     }
 
-    private func calculateFolderSizes(for folders: [FileSystemItem]) async {
-        for folder in folders {
-            // Skip if already calculated
-            if folderSizes[folder.path] != nil {
-                continue
-            }
+    nonisolated static func isPermissionDenied(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain,
+           nsError.code == NSFileReadNoPermissionError {
+            return true
+        }
+        if nsError.domain == NSPOSIXErrorDomain {
+            return nsError.code == Int(EACCES) || nsError.code == Int(EPERM)
+        }
+        return false
+    }
 
+    /// Folder sizes are intentionally opt-in. Recursively sizing every visible
+    /// directory made opening Home, cloud folders and removable drives stall.
+    func calculateFolderSize(for folder: FileSystemItem) {
+        guard folder.type == .folder, folderSizes[folder.path] == nil else { return }
+        let path = folder.path
+        Task { [weak self] in
             do {
-                let size = try await fileSystemService.calculateFolderSize(at: folder.path)
-                await MainActor.run {
-                    self.folderSizes[folder.path] = size
-                }
+                let size = try await self?.fileSystemService.calculateFolderSize(at: path)
+                guard let self, let size else { return }
+                self.folderSizes[path] = size
+            } catch is CancellationError {
+                return
             } catch {
-                // Silently fail for inaccessible folders
+                self?.errorMessage = "Could not calculate the size of \(folder.name): \(error.localizedDescription)"
             }
         }
     }
@@ -193,34 +228,22 @@ class FileExplorerViewModel: ObservableObject {
     // MARK: - Navigation
 
     func navigate(to url: URL) {
+        guard url.standardizedFileURL != currentPath.standardizedFileURL else { return }
+
         // Exit tag filter mode when navigating to any folder
         if tagFilterMode != nil {
             exitTagFilterMode()
         }
 
-        guard fileSystemService.pathExists(url) else {
-            errorMessage = "Path does not exist: \(url.path)"
-            return
-        }
-
-        // Add to history
-        if currentHistoryIndex < navigationHistory.count - 1 {
-            // Remove forward history when navigating to new location
-            navigationHistory.removeSubrange((currentHistoryIndex + 1)...)
-        }
-
-        navigationHistory.append(currentPath)
-        currentHistoryIndex = navigationHistory.count - 1
+        navigationHistory.navigate(to: url)
 
         // Update navigation state
         updateNavigationState()
 
-        // Navigate
-        currentPath = url
-        selectedItems.removeAll()
+        prepareForNavigation(to: url)
 
         Task {
-            await loadContents()
+            await loadContents(showLoadingIndicator: false)
         }
     }
 
@@ -232,36 +255,59 @@ class FileExplorerViewModel: ObservableObject {
     }
 
     func navigateBack() {
-        guard canGoBack, currentHistoryIndex > 0 else { return }
-
-        currentHistoryIndex -= 1
-        currentPath = navigationHistory[currentHistoryIndex]
-        selectedItems.removeAll()
+        guard let destination = navigationHistory.goBack() else { return }
+        prepareForNavigation(to: destination)
 
         Task {
-            await loadContents()
+            await loadContents(showLoadingIndicator: false)
         }
 
         updateNavigationState()
     }
 
     func navigateForward() {
-        guard canGoForward, currentHistoryIndex < navigationHistory.count - 1 else { return }
-
-        currentHistoryIndex += 1
-        currentPath = navigationHistory[currentHistoryIndex]
-        selectedItems.removeAll()
+        guard let destination = navigationHistory.goForward() else { return }
+        prepareForNavigation(to: destination)
 
         Task {
-            await loadContents()
+            await loadContents(showLoadingIndicator: false)
         }
 
         updateNavigationState()
     }
 
+    /// A mounted volume can disappear while Folder is displaying a folder on
+    /// it. Go back to the last location outside that volume instead of leaving
+    /// a stale, non-existent directory as the current view.
+    func navigateAwayFromUnmountedVolume(_ volumeRoot: URL) {
+        let normalizedRoot = volumeRoot.standardizedFileURL.path
+        let current = currentPath.standardizedFileURL.path
+        let rootPrefix = normalizedRoot.hasSuffix("/") ? normalizedRoot : normalizedRoot + "/"
+
+        guard current == normalizedRoot || current.hasPrefix(rootPrefix) else { return }
+
+        let fallback = navigationHistory.lastLocationOutsideVolume(volumeRoot)
+            ?? fileSystemService.homeDirectory()
+        navigate(to: fallback)
+    }
+
     private func updateNavigationState() {
-        canGoBack = currentHistoryIndex > 0
-        canGoForward = currentHistoryIndex < navigationHistory.count - 1
+        canGoBack = navigationHistory.canGoBack
+        canGoForward = navigationHistory.canGoForward
+    }
+
+    /// Makes path changes visually atomic: the old directory is removed and
+    /// any in-flight load invalidated before SwiftUI can render the new path.
+    private func prepareForNavigation(to url: URL) {
+        loadGeneration += 1
+        isLoading = true
+        errorMessage = nil
+        requiresPermission = false
+        items = []
+        selectedItems.removeAll()
+        selectedItemID = nil
+        lastSelectedItem = nil
+        currentPath = url
     }
 
     // MARK: - Item Selection
@@ -301,6 +347,23 @@ class FileExplorerViewModel: ObservableObject {
         withTransaction(transaction) {
             selectedItems.removeAll()
             selectedItemID = nil
+        }
+    }
+
+    func selectOnly(_ item: FileSystemItem) {
+        QuickLookManager.shared.prioritizePreview(for: item)
+        if selectedItems == [item.id] {
+            selectedItemID = item.id
+            lastSelectedItem = item.id
+            return
+        }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            selectedItems = [item.id]
+            selectedItemID = item.id
+            lastSelectedItem = item.id
         }
     }
 
@@ -397,56 +460,52 @@ class FileExplorerViewModel: ObservableObject {
     func selectNextItem() {
         guard !items.isEmpty else { return }
 
-        if let firstSelected = selectedItems.first,
-           let currentIndex = items.firstIndex(where: { $0.id == firstSelected }) {
+        if let currentID = selectedItemID ?? lastSelectedItem,
+           let currentIndex = items.firstIndex(where: { $0.id == currentID }) {
             let nextIndex = min(currentIndex + 1, items.count - 1)
-            clearSelection()
-            selectedItems.insert(items[nextIndex].id)
+            selectOnly(items[nextIndex])
         } else {
             // No selection, select first item
-            selectedItems.insert(items[0].id)
+            selectOnly(items[0])
         }
     }
 
     func selectPreviousItem() {
         guard !items.isEmpty else { return }
 
-        if let firstSelected = selectedItems.first,
-           let currentIndex = items.firstIndex(where: { $0.id == firstSelected }) {
+        if let currentID = selectedItemID ?? lastSelectedItem,
+           let currentIndex = items.firstIndex(where: { $0.id == currentID }) {
             let prevIndex = max(currentIndex - 1, 0)
-            clearSelection()
-            selectedItems.insert(items[prevIndex].id)
+            selectOnly(items[prevIndex])
         } else {
             // No selection, select first item
-            selectedItems.insert(items[0].id)
+            selectOnly(items[0])
         }
     }
 
     func selectItemBelow(columnsPerRow: Int) {
         guard !items.isEmpty else { return }
 
-        if let firstSelected = selectedItems.first,
-           let currentIndex = items.firstIndex(where: { $0.id == firstSelected }) {
+        if let currentID = selectedItemID ?? lastSelectedItem,
+           let currentIndex = items.firstIndex(where: { $0.id == currentID }) {
             let nextIndex = min(currentIndex + columnsPerRow, items.count - 1)
-            clearSelection()
-            selectedItems.insert(items[nextIndex].id)
+            selectOnly(items[nextIndex])
         } else {
             // No selection, select first item
-            selectedItems.insert(items[0].id)
+            selectOnly(items[0])
         }
     }
 
     func selectItemAbove(columnsPerRow: Int) {
         guard !items.isEmpty else { return }
 
-        if let firstSelected = selectedItems.first,
-           let currentIndex = items.firstIndex(where: { $0.id == firstSelected }) {
+        if let currentID = selectedItemID ?? lastSelectedItem,
+           let currentIndex = items.firstIndex(where: { $0.id == currentID }) {
             let prevIndex = max(currentIndex - columnsPerRow, 0)
-            clearSelection()
-            selectedItems.insert(items[prevIndex].id)
+            selectOnly(items[prevIndex])
         } else {
             // No selection, select first item
-            selectedItems.insert(items[0].id)
+            selectOnly(items[0])
         }
     }
 
@@ -476,54 +535,19 @@ class FileExplorerViewModel: ObservableObject {
     // MARK: - File Operations
 
     func createNewFolder(named name: String, autoRename: Bool = false) {
-        // Start accessing the directory with security-scoped resource
-        let accessing = currentPath.startAccessingSecurityScopedResource()
-        defer {
-            if accessing {
-                currentPath.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        // Resolve unique name if folder already exists
-        var finalName = name
-        let fm = FileManager.default
-        if fm.fileExists(atPath: currentPath.appendingPathComponent(name).path) {
-            var counter = 2
-            while fm.fileExists(atPath: currentPath.appendingPathComponent("\(name) (\(counter))").path) {
-                counter += 1
-            }
-            finalName = "\(name) (\(counter))"
-        }
-
-        do {
-            try fileSystemService.createFolder(at: currentPath, named: finalName)
-
-            if autoRename {
-                // Refresh to get the new folder, then start renaming it
-                Task {
-                    await loadContents()
-                    // Find the newly created folder
-                    if let newFolder = items.first(where: { $0.name == finalName && $0.type == .folder }) {
-                        startRenaming(newFolder)
-                    }
+        FileOperationCoordinator.shared.createFolder(in: currentPath, named: name) { [weak self] newURL in
+            guard autoRename, let self, let newURL else { return }
+            Task {
+                await self.loadContents()
+                if let newFolder = self.items.first(where: { $0.path.standardizedFileURL == newURL.standardizedFileURL }) {
+                    self.startRenaming(newFolder)
                 }
-            } else {
-                refresh()
             }
-        } catch {
-            errorMessage = "Failed to create folder: \(error.localizedDescription)"
         }
     }
 
     func renameItem(_ item: FileSystemItem, to newName: String) {
-        let newPath = item.path.deletingLastPathComponent().appendingPathComponent(newName)
-
-        do {
-            try FileManager.default.moveItem(at: item.path, to: newPath)
-            refresh()
-        } catch {
-            errorMessage = "Failed to rename item: \(error.localizedDescription)"
-        }
+        FileOperationCoordinator.shared.rename(item.path, to: newName)
     }
 
     func startRenaming(_ item: FileSystemItem) {
@@ -554,54 +578,8 @@ class FileExplorerViewModel: ObservableObject {
 
         guard !selectedItemsList.isEmpty else { return }
 
-        // Show confirmation dialog
-        let alert = NSAlert()
-        alert.messageText = "Move to Trash"
-
-        let itemCount = selectedItemsList.count
-        if itemCount == 1 {
-            alert.informativeText = "Are you sure you want to move \"\(selectedItemsList[0].name)\" to the trash?"
-        } else {
-            alert.informativeText = "Are you sure you want to move \(itemCount) items to the trash?"
-        }
-
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Yes")
-        alert.addButton(withTitle: "No")
-
-        // Set default button to "No" for safety
-        alert.buttons[1].keyEquivalent = "\r"  // Enter key confirms "No"
-        alert.buttons[0].keyEquivalent = ""     // Remove default from "Yes"
-
-        let response = alert.runModal()
-
-        // Only delete if user clicked "Yes" (first button)
-        guard response == .alertFirstButtonReturn else {
-            return
-        }
-
-        var sourceURLs: [URL] = []
-        var trashURLs: [URL] = []
-
-        for item in selectedItemsList {
-            do {
-                var trashNSURL: NSURL?
-                try FileManager.default.trashItem(at: item.path, resultingItemURL: &trashNSURL)
-                sourceURLs.append(item.path)
-                trashURLs.append(trashNSURL as URL? ?? item.path)
-            } catch {
-                errorMessage = "Failed to delete item: \(error.localizedDescription)"
-            }
-        }
-
-        if !sourceURLs.isEmpty {
-            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                type: .trash, sourceURLs: sourceURLs, destinationURLs: trashURLs
-            ))
-        }
-
+        FileOperationCoordinator.shared.moveToTrash(selectedItemsList.map(\.path))
         selectedItems.removeAll()
-        refresh()
     }
 
     // MARK: - Tag Filter Mode

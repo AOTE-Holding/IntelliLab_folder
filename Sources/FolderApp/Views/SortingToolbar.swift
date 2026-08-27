@@ -1,41 +1,76 @@
 import SwiftUI
 
-/// Toolbar with icon buttons for sorting files (Windows-style)
+/// Compact IntelliLab control strip for Finder-style sorting.
 struct SortingToolbar: View {
     @ObservedObject var viewModel: FileExplorerViewModel
+    @AppStorage("com.folder.sort-toolbar-alignment") private var alignmentRaw = ToolbarAlignment.leading.rawValue
 
     var body: some View {
-        HStack(spacing: 4) {
-            Spacer()
+        ZStack(alignment: toolbarAlignment) {
+            // The unused part of this control strip is still part of the file
+            // area. Keep it clickable so a single click clears the current
+            // selection, just like clicking empty space below the grid/list.
+            Color.clear
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    viewModel.clearSelection()
+                }
 
-            sortButton(
-                title: "Name",
-                icon: "textformat",
-                option: .name
-            )
+            HStack(spacing: 9) {
+                sortButton(
+                    title: "Name",
+                    icon: "textformat",
+                    option: .name
+                )
 
-            sortButton(
-                title: "Date",
-                icon: "calendar",
-                option: .dateModified
-            )
+                sortButton(
+                    title: "Date",
+                    icon: "calendar",
+                    option: .dateModified
+                )
 
-            sortButton(
-                title: "Size",
-                icon: "archivebox",
-                option: .size
-            )
+                sortButton(
+                    title: "Size",
+                    icon: "archivebox",
+                    option: .size
+                )
 
-            sortButton(
-                title: "Type",
-                icon: "doc",
-                option: .type
-            )
-
-            Spacer()
+                sortButton(
+                    title: "Type",
+                    icon: "doc",
+                    option: .type
+                )
+            }
+            .fixedSize(horizontal: true, vertical: false)
         }
+        .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32, alignment: toolbarAlignment)
         .padding(.horizontal, 12)
-        .padding(.vertical, 6)
+        .padding(.top, 2)
+        .padding(.bottom, 8)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                alignmentRaw = ToolbarAlignment.leading.rawValue
+            } label: {
+                Label("Dock Left", systemImage: toolbarAlignment == .leading ? "checkmark" : "")
+            }
+
+            Button {
+                alignmentRaw = ToolbarAlignment.center.rawValue
+            } label: {
+                Label("Dock Center", systemImage: toolbarAlignment == .center ? "checkmark" : "")
+            }
+
+            Button {
+                alignmentRaw = ToolbarAlignment.trailing.rawValue
+            } label: {
+                Label("Dock Right", systemImage: toolbarAlignment == .trailing ? "checkmark" : "")
+            }
+        }
+    }
+
+    private var toolbarAlignment: Alignment {
+        ToolbarAlignment(rawValue: alignmentRaw)?.alignment ?? .leading
     }
 
     private func sortButton(title: String, icon: String, option: ViewMode.SortOption) -> some View {
@@ -61,15 +96,35 @@ struct SortingToolbar: View {
                         .font(.system(size: 10, weight: .bold))
                 }
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            // The whole visual chip is the control, including its padded area.
+            // Without an explicit shape SwiftUI can restrict hit testing to the
+            // glyphs/text when this toolbar is embedded in the file views.
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(minHeight: 30)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .background(
-            RoundedRectangle(cornerRadius: 4)
-                .fill(viewModel.viewMode.sortBy == option ? Color.folderAccent.opacity(0.15) : Color.clear)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(viewModel.viewMode.sortBy == option ? Color.folderAccent.opacity(0.18) : Color.clear)
         )
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .foregroundStyle(viewModel.viewMode.sortBy == option ? Color.folderAccent : .secondary)
         .buttonStyle(.plain)
-        .focusable(false)
         .help("Sort by \(title)")
+    }
+
+    private enum ToolbarAlignment: String {
+        case leading
+        case center
+        case trailing
+
+        var alignment: Alignment {
+            switch self {
+            case .leading: .leading
+            case .center: .center
+            case .trailing: .trailing
+            }
+        }
     }
 }

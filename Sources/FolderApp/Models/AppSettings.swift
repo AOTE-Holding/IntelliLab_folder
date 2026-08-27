@@ -18,6 +18,9 @@ struct AppSettings: Codable {
     var globalHotkey: GlobalHotkey
     var launchAtLogin: Bool
     var showMenuBarIcon: Bool
+    /// Disabled by default so Folder keeps its simple single-folder browser
+    /// unless the user explicitly opts into tabbed navigation.
+    var tabsEnabled: Bool?
 
     // Sidebar visibility
     var showSidebar: Bool
@@ -35,7 +38,7 @@ struct AppSettings: Codable {
 
     // Helper to get terminal name for display
     var terminalAppName: String {
-        if let customPath = customTerminalPath {
+        if defaultTerminal == .custom, let customPath = customTerminalPath {
             return customPath.deletingPathExtension().lastPathComponent
         }
         return defaultTerminal.rawValue
@@ -56,16 +59,26 @@ struct AppSettings: Codable {
         case terminal = "Terminal"
         case iterm2 = "iTerm"
         case warp = "Warp"
+        case ghostty = "Ghostty"
+        case cmux = "cmux"
+        case tmux = "tmux (in Terminal)"
         case kitty = "kitty"
         case alacritty = "Alacritty"
+        case custom = "Other App…"
+
+        static let supportedCases: [TerminalApp] = allCases
 
         var bundleIdentifier: String {
             switch self {
             case .terminal: return "com.apple.Terminal"
             case .iterm2: return "com.googlecode.iterm2"
             case .warp: return "dev.warp.Warp-Stable"
+            case .ghostty: return "com.mitchellh.ghostty"
+            case .cmux: return "com.manaflow.cmux"
+            case .tmux: return ""
             case .kitty: return "net.kovidgoyal.kitty"
             case .alacritty: return "org.alacritty"
+            case .custom: return ""
             }
         }
     }
@@ -82,6 +95,7 @@ struct AppSettings: Codable {
         globalHotkey: GlobalHotkey(),
         launchAtLogin: false,
         showMenuBarIcon: true,
+        tabsEnabled: false,
         showSidebar: true,
         showFavoritesSection: true,
         showRecentSection: false,
@@ -180,6 +194,7 @@ class SettingsManager: ObservableObject {
     @Published var settings: AppSettings {
         didSet {
             save()
+            NotificationCenter.default.post(name: .appSettingsDidChange, object: settings)
         }
     }
 
@@ -189,7 +204,10 @@ class SettingsManager: ObservableObject {
     private init() {
         // Load settings from UserDefaults
         if let data = defaults.data(forKey: settingsKey),
-           let decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
+           var decoded = try? JSONDecoder().decode(AppSettings.self, from: data) {
+            if !AppSettings.TerminalApp.supportedCases.contains(decoded.defaultTerminal) {
+                decoded.defaultTerminal = .terminal
+            }
             self.settings = decoded
         } else {
             self.settings = .default
@@ -205,4 +223,8 @@ class SettingsManager: ObservableObject {
     func reset() {
         settings = .default
     }
+}
+
+extension Notification.Name {
+    static let appSettingsDidChange = Notification.Name("AppSettingsDidChange")
 }

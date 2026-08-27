@@ -1,110 +1,129 @@
 #!/bin/bash
-# Build script for Folder app
+set -euo pipefail
 
-set -e  # Exit on error
-
-echo "🔨 Building Folder app..."
-
-# Read version from VERSION file
-APP_VERSION=$(cat VERSION)
-echo "📌 Version: ${APP_VERSION}"
-
-# Generate Version.swift
-echo "let appVersion = \"${APP_VERSION}\"" > Sources/FolderApp/Version.swift
-
-# Clean previous builds
-echo "🧹 Cleaning previous builds..."
-rm -rf .build 2>/dev/null || true
-rm -rf Folder.app
-
-# Build with Swift Package Manager
-echo "📦 Compiling Swift code..."
-swift build -c release
-
-# Create .app bundle structure
-echo "📱 Creating .app bundle..."
 APP_NAME="Folder"
+APP_VERSION="$(<VERSION)"
+BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-development}"
 APP_BUNDLE="${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"
 MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
+FRAMEWORKS="${CONTENTS}/Frameworks"
+PLUGINS="${CONTENTS}/PlugIns"
+QUICKLOOK_APPEX="${PLUGINS}/FolderQuickLookPreview.appex"
+QUICKLOOK_CONTENTS="${QUICKLOOK_APPEX}/Contents"
+QUICKLOOK_MACOS="${QUICKLOOK_CONTENTS}/MacOS"
+QUICKLOOK_EXECUTABLE="${QUICKLOOK_MACOS}/FolderQuickLookPreview"
 
-mkdir -p "${MACOS}"
-mkdir -p "${RESOURCES}"
-
-# Copy the executable
-echo "📋 Copying executable..."
-cp ".build/release/Folder" "${MACOS}/${APP_NAME}"
-
-# Create Info.plist
-echo "📄 Creating Info.plist..."
-cat > "${CONTENTS}/Info.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
-    <key>CFBundleExecutable</key>
-    <string>Folder</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.folder.app</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>Folder</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${APP_VERSION}</string>
-    <key>CFBundleVersion</key>
-    <string>${APP_VERSION}</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>com.folder.app</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>folder</string>
-            </array>
-        </dict>
-    </array>
-    <key>NSDesktopFolderUsageDescription</key>
-    <string>Folder needs access to browse files on your Desktop.</string>
-    <key>NSDocumentsFolderUsageDescription</key>
-    <string>Folder needs access to browse your documents.</string>
-    <key>NSDownloadsFolderUsageDescription</key>
-    <string>Folder needs access to browse your downloads.</string>
-</dict>
-</plist>
-EOF
-
-# Copy app icon if it exists
-if [ -f "Resources/AppIcon.icns" ]; then
-    echo "🎨 Copying app icon..."
-    cp "Resources/AppIcon.icns" "${RESOURCES}/"
+if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then
+  required=(BUNDLE_IDENTIFIER DEVELOPMENT_TEAM CODE_SIGN_IDENTITY SPARKLE_FEED_URL SPARKLE_PUBLIC_ED_KEY)
+  for variable in "${required[@]}"; do
+    if [[ -z "${!variable:-}" ]]; then
+      echo "Release configuration is missing ${variable}." >&2
+      exit 1
+    fi
+  done
+else
+  BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.intellilab.folder.development}"
+  CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
+  DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-}"
+  SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://invalid.example/appcast.xml}"
+  SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-DEVELOPMENT_BUILD_NO_KEY}"
 fi
 
-# Make executable
+echo "Building ${APP_NAME} ${APP_VERSION} (${BUILD_CONFIGURATION})"
+swift build -c release -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
+
+rm -rf "${APP_BUNDLE}"
+mkdir -p "${MACOS}" "${RESOURCES}" "${FRAMEWORKS}" "${QUICKLOOK_MACOS}"
+ditto ".build/release/Folder" "${MACOS}/${APP_NAME}"
+ditto "Resources/AppIcon.icns" "${RESOURCES}/AppIcon.icns"
+
+# QLPreviewPanel deliberately doesn't accept arbitrary custom AppKit content.
+# Apple's supported mechanism is a Quick Look Preview Extension whose native
+# NSViewController conforms to QLPreviewingController.
+EXTENSION_ARCH="$(uname -m)"
+env \
+  CLANG_MODULE_CACHE_PATH="${PWD}/.build/quicklook-module-cache" \
+  SWIFT_MODULECACHE_PATH="${PWD}/.build/quicklook-module-cache" \
+  swiftc \
+    -module-name FolderQuickLookPreviewExtension \
+    -parse-as-library \
+    -emit-executable \
+    -O \
+    -warnings-as-errors \
+    -strict-concurrency=complete \
+    -target "${EXTENSION_ARCH}-apple-macosx13.0" \
+    "QuickLookExtension/FolderQuickLookPreviewController.swift" \
+    -o "${QUICKLOOK_EXECUTABLE}" \
+    -framework AppKit \
+    -framework Quartz \
+    -Xlinker -e \
+    -Xlinker _NSExtensionMain
+
+QUICKLOOK_PLIST="${QUICKLOOK_CONTENTS}/Info.plist"
+ditto "QuickLookExtension/Info.plist.template" "${QUICKLOOK_PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_IDENTIFIER}.quicklookpreview" "${QUICKLOOK_PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${QUICKLOOK_PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION}" "${QUICKLOOK_PLIST}"
+chmod +x "${QUICKLOOK_EXECUTABLE}"
+
+SPARKLE_FRAMEWORK="$(find .build -path '*/Sparkle.framework' -type d -print -quit)"
+if [[ -z "${SPARKLE_FRAMEWORK}" ]]; then
+  echo "Sparkle.framework was not produced by SwiftPM." >&2
+  exit 1
+fi
+ditto "${SPARKLE_FRAMEWORK}" "${FRAMEWORKS}/Sparkle.framework"
+folder_otool_output="$(otool -l "${MACOS}/${APP_NAME}")"
+if ! grep -Fq '@executable_path/../Frameworks' <<< "${folder_otool_output}"; then
+  install_name_tool -add_rpath '@executable_path/../Frameworks' "${MACOS}/${APP_NAME}"
+fi
+
+PLIST="${CONTENTS}/Info.plist"
+ditto Resources/Info.plist.template "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_IDENTIFIER}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :SUFeedURL ${SPARKLE_FEED_URL}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" "${PLIST}"
+/usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName ${BUNDLE_IDENTIFIER}" "${PLIST}"
+
 chmod +x "${MACOS}/${APP_NAME}"
+SIGN_OPTIONS=(--options runtime)
+if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then SIGN_OPTIONS+=(--timestamp); fi
 
-# Code sign with entitlements
-echo "🔒 Code signing with entitlements..."
-codesign --force --sign - --entitlements Folder.entitlements --deep "${APP_BUNDLE}"
+# Sparkle's nested services must be signed inside-out. `--deep` verification
+# alone does not catch a Team-ID mismatch at dyld load time.
+SPARKLE_VERSION="${FRAMEWORKS}/Sparkle.framework/Versions/B"
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  "${SPARKLE_VERSION}/XPCServices/Installer.xpc"
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  --preserve-metadata=entitlements \
+  "${SPARKLE_VERSION}/XPCServices/Downloader.xpc"
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  "${SPARKLE_VERSION}/Autoupdate"
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  "${SPARKLE_VERSION}/Updater.app"
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  "${FRAMEWORKS}/Sparkle.framework"
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  --entitlements "QuickLookExtension/FolderQuickLookPreview.entitlements" \
+  "${QUICKLOOK_APPEX}"
+codesign --verify --strict --verbose=2 "${QUICKLOOK_APPEX}"
 
-echo "✅ Build complete! App bundle created at: ${APP_BUNDLE}"
-echo ""
-echo "To install system-wide:"
-echo "  ./install.sh"
-echo ""
-echo "Or open it manually:"
-echo "  open ${APP_BUNDLE}"
+ENTITLEMENTS_FILE="Folder.entitlements"
+if [[ "${BUILD_CONFIGURATION}" != "release" ]]; then
+  ENTITLEMENTS_FILE="Folder.development.entitlements"
+fi
+codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  --entitlements "${ENTITLEMENTS_FILE}" "${APP_BUNDLE}"
+codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
+
+if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then
+  actual_bundle_id="$(codesign -dv --verbose=4 "${APP_BUNDLE}" 2>&1 | sed -n 's/^Identifier=//p')"
+  actual_team_id="$(codesign -dv --verbose=4 "${APP_BUNDLE}" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  [[ "${actual_bundle_id}" == "${BUNDLE_IDENTIFIER}" ]]
+  [[ "${actual_team_id}" == "${DEVELOPMENT_TEAM}" ]]
+fi
+
+echo "Created ${APP_BUNDLE}"

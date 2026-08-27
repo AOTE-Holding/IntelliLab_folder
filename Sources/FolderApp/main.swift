@@ -9,12 +9,23 @@ import AppKit
 import SwiftUI
 
 // Create app delegate
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     var mainWindowController: NSWindowController?
     var settingsWindowController: NSWindowController?
+    var onboardingWindowController: NSWindowController?
     var statusItem: NSStatusItem?
+    private var pendingFolderURLs: [URL] = []
+    private var didStartUpdateCheck = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A process-local reset is deliberately handled before any window is
+        // chosen. It bypasses delayed CFPreferences writes, so support and
+        // development can always reopen the first-run permission walkthrough.
+        if ProcessInfo.processInfo.arguments.contains("--reset-permissions") {
+            PermissionCenter.shared.resetAll()
+        }
+
         setupMenu()
         Task { @MainActor in
             self.setupStatusBarIcon()
@@ -29,28 +40,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             andEventID: AEEventID(kAEGetURL)
         )
 
-        // Create the main window using window controller
-        let contentView = ContentView()
-            .environmentObject(SettingsManager.shared)
-
-        mainWindowController = SwiftUIWindowController(
-            rootView: contentView,
-            title: "Folder",
-            size: NSSize(width: 1000, height: 700)
-        )
-
-        mainWindowController?.window?.setFrameAutosaveName("MainWindow")
-        mainWindowController?.showWindow(nil)
-
-        // Add to WindowManager for proper lifecycle management
-        WindowManager.shared.addWindowController(mainWindowController!)
-
-        // Check for updates silently on launch
-        Task {
-            await UpdateService.shared.checkForUpdates(silent: true)
-            if UpdateService.shared.updateAvailable {
-                self.showUpdateAlert()
-            }
+        // On a clean install the permission walkthrough is the only window.
+        // Constructing ContentView eagerly would immediately enumerate the
+        // last folder and let macOS present a Files & Folders prompt in front
+        // of our explanation.
+        if PermissionCenter.shared.hasSeenOnboarding {
+            showMainWindow()
+        } else {
+            showOnboarding()
         }
     }
 
@@ -60,9 +57,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag {
-            // Restore main window when clicking dock icon
-            mainWindowController?.showWindow(nil)
-            mainWindowController?.window?.makeKeyAndOrderFront(nil)
+            if PermissionCenter.shared.hasSeenOnboarding {
+                showMainWindow()
+            } else {
+                showOnboarding()
+            }
         }
         return true
     }
@@ -81,30 +80,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Handle the native URL-delivery path as well as the Apple event path.
+    /// Launch Services delivers directories as file URLs when Folder is the
+    /// user's preferred handler for `public.folder`.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.scheme == "folder" {
+            handleFolderURL(url)
+        }
+
+        let folderURLs = urls.filter { url in
+            guard url.isFileURL else { return false }
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                && isDirectory.boolValue
+        }
+        openFolders(folderURLs)
+    }
+
     @MainActor private func handleFolderURL(_ url: URL) {
-        // Parse URL: folder://open?path=/path/to/folder
-        if url.host == "open", let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+        // Parse URL: folder://open?path=/folder or folder://open-file?path=/file
+        if ["open", "open-file"].contains(url.host),
+           let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
             if let pathItem = components.queryItems?.first(where: { $0.name == "path" }),
                let folderPath = pathItem.value {
                 let folderURL = URL(fileURLWithPath: folderPath)
 
                 print("Opening folder from URL: \(folderPath)")
 
-                // Navigate main window instead of creating new window
-                mainWindowController?.showWindow(nil)
-                mainWindowController?.window?.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
+                guard PermissionCenter.shared.hasSeenOnboarding else {
+                    pendingFolderURLs = [folderURL]
+                    showOnboarding()
+                    return
+                }
 
-                // Post notification to navigate to path
-                NotificationCenter.default.post(
-                    name: NSNotification.Name("NavigateToPath"),
-                    object: folderURL
-                )
+                if url.host == "open-file" {
+                    let access = PermissionCenter.shared.beginAccess(to: folderURL)
+                    _ = NSWorkspace.shared.open(access?.url ?? folderURL)
+                    access?.stop()
+                    return
+                }
+
+                openFolders([folderURL])
             }
         }
     }
 
+    @MainActor private func openFolders(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+
+        guard PermissionCenter.shared.hasSeenOnboarding else {
+            pendingFolderURLs = urls
+            showOnboarding()
+            return
+        }
+
+        showMainWindow()
+        // `showMainWindow` can create ContentView. Post on the following
+        // run-loop turn so its notification subscriptions are installed.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .openFolders, object: urls)
+        }
+    }
+
     @MainActor @objc func showSettings() {
+        guard PermissionCenter.shared.hasSeenOnboarding else {
+            showOnboarding()
+            return
+        }
         if settingsWindowController == nil {
             let settingsView = SettingsView()
                 .environmentObject(SettingsManager.shared)
@@ -112,20 +154,57 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             settingsWindowController = SwiftUIWindowController(
                 rootView: settingsView,
                 title: "Settings",
-                size: NSSize(width: 550, height: 700),
+                size: NSSize(width: 640, height: 720),
                 styleMask: [.titled, .closable]
             )
 
             settingsWindowController?.window?.level = .floating
         }
 
+        settingsWindowController?.window?.makeKeyAndOrderFront(nil)
         settingsWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Show the first-launch permission assistant.
+    @MainActor private func showOnboarding() {
+        guard onboardingWindowController == nil else {
+            onboardingWindowController?.showWindow(nil)
+            onboardingWindowController?.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let onboardingView = PermissionOnboardingView {
+            self.onboardingWindowController?.close()
+            self.onboardingWindowController = nil
+            self.showMainWindow()
+
+            if !self.pendingFolderURLs.isEmpty {
+                let pendingURLs = self.pendingFolderURLs
+                self.pendingFolderURLs = []
+                self.openFolders(pendingURLs)
+            }
+        }
+
+        let controller = SwiftUIWindowController(
+            rootView: onboardingView,
+            title: "Folder — Permissions",
+            size: NSSize(width: 660, height: 600),
+            styleMask: [.titled]
+        )
+
+        onboardingWindowController = controller
+        controller.window?.level = .floating
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor private func setupStatusBarIcon() {
         // Observe settings changes
         NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification,
+            forName: .appSettingsDidChange,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -161,7 +240,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private func setupGlobalHotkey() {
         // Observe settings changes for hotkey updates
         NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification,
+            forName: .appSettingsDidChange,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -177,7 +256,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private func updateGlobalHotkey() {
         let settings = SettingsManager.shared.settings.globalHotkey
 
-        if settings.enabled {
+        if settings.enabled && !settings.modifiers.isEmpty {
             if let keyCode = GlobalHotkeyManager.keyCodeFromString(settings.key) {
                 let modifiers = GlobalHotkeyManager.carbonModifiersFromSettings(settings.modifiers)
                 GlobalHotkeyManager.shared.registerHotkey(keyCode: keyCode, modifiers: modifiers)
@@ -188,38 +267,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func showMainWindow() {
+        guard PermissionCenter.shared.hasSeenOnboarding else {
+            showOnboarding()
+            return
+        }
+
+        if mainWindowController == nil {
+            let contentView = ContentView()
+                .environmentObject(SettingsManager.shared)
+
+            let controller = SwiftUIWindowController(
+                rootView: contentView,
+                title: "Folder",
+                size: NSSize(width: 1000, height: 700),
+                hidesTitle: true
+            )
+            controller.window?.setFrameAutosaveName("MainWindow")
+            mainWindowController = controller
+            WindowManager.shared.addWindowController(controller)
+        }
+
         mainWindowController?.showWindow(nil)
         mainWindowController?.window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        if !didStartUpdateCheck {
+            didStartUpdateCheck = true
+            UpdateService.shared.checkInBackground()
+        }
     }
 
     @objc func checkForUpdates() {
-        Task { @MainActor in
-            await UpdateService.shared.checkForUpdates(silent: false)
-            if UpdateService.shared.updateAvailable {
-                self.showUpdateAlert()
-            } else {
-                let alert = NSAlert()
-                alert.messageText = "You're up to date!"
-                alert.informativeText = "Folder \(appVersion) is the latest version."
-                alert.runModal()
-            }
+        UpdateService.shared.checkForUpdates()
+    }
+
+    @objc func createFolderTab() {
+        guard SettingsManager.shared.settings.tabsEnabled ?? false else { return }
+        showMainWindow()
+        NotificationCenter.default.post(name: .createFolderTab, object: nil)
+    }
+
+    @objc func closeFolderTab() {
+        if SettingsManager.shared.settings.tabsEnabled ?? false {
+            NotificationCenter.default.post(name: .closeFolderTab, object: nil)
+        } else {
+            NSApp.keyWindow?.performClose(nil)
         }
     }
 
-    @MainActor private func showUpdateAlert() {
-        let service = UpdateService.shared
-        let alert = NSAlert()
-        alert.messageText = "Update Available"
-        alert.informativeText = "Folder \(service.latestVersion) is available (you have \(appVersion)).\n\n\(service.releaseNotes)"
-        alert.addButton(withTitle: "Update Now")
-        alert.addButton(withTitle: "Later")
-
-        if alert.runModal() == .alertFirstButtonReturn {
-            Task {
-                await service.downloadAndInstall()
-            }
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(createFolderTab) {
+            return SettingsManager.shared.settings.tabsEnabled ?? false
         }
+        return true
     }
 
     private func setupMenu() {
@@ -231,6 +331,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
 
         appMenu.addItem(withTitle: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Permissions...", action: #selector(showSettings), keyEquivalent: "")
         appMenu.addItem(withTitle: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Folder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -243,8 +344,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenuItem.submenu = fileMenu
 
         fileMenu.addItem(withTitle: "New Folder", action: nil, keyEquivalent: "n")
+        fileMenu.addItem(withTitle: "New Tab", action: #selector(createFolderTab), keyEquivalent: "t")
         fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenu.addItem(withTitle: "Close", action: #selector(closeFolderTab), keyEquivalent: "w")
 
         mainMenu.addItem(fileMenuItem)
 
@@ -267,7 +369,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
 // Main entry point
 let app = NSApplication.shared
-let delegate = AppDelegate()
+// AppKit starts the application on the main thread, while Swift 6 treats
+// top-level executable code as nonisolated. Bridge that boundary explicitly
+// before constructing the main-actor UI delegate.
+let delegate = MainActor.assumeIsolated { AppDelegate() }
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.activate(ignoringOtherApps: true)

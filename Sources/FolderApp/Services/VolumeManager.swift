@@ -6,10 +6,13 @@ class VolumeManager: ObservableObject {
     static let shared = VolumeManager()
 
     @Published var mountedVolumes: [VolumeInfo] = []
+    /// Emitted after macOS has actually removed a mounted volume. Consumers
+    /// use this to leave any directory that belonged to the ejected device.
+    @Published private(set) var lastUnmountedVolumeURL: URL?
 
     private init() {
-        loadMountedVolumes()
         setupNotifications()
+        reloadMountedVolumes()
     }
 
     private func setupNotifications() {
@@ -29,14 +32,24 @@ class VolumeManager: ObservableObject {
     }
 
     @objc private func volumeDidMount(_ notification: Notification) {
-        loadMountedVolumes()
+        reloadMountedVolumes()
     }
 
     @objc private func volumeDidUnmount(_ notification: Notification) {
-        loadMountedVolumes()
+        lastUnmountedVolumeURL = notification.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL
+        reloadMountedVolumes()
     }
 
-    private func loadMountedVolumes() {
+    private func reloadMountedVolumes() {
+        Task { [weak self] in
+            let volumes = await Task.detached(priority: .utility) {
+                Self.discoverMountedVolumes()
+            }.value
+            self?.mountedVolumes = volumes
+        }
+    }
+
+    nonisolated private static func discoverMountedVolumes() -> [VolumeInfo] {
         guard let urls = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: [
                 .volumeNameKey,
@@ -48,8 +61,7 @@ class VolumeManager: ObservableObject {
             ],
             options: [.skipHiddenVolumes]
         ) else {
-            mountedVolumes = []
-            return
+            return []
         }
 
         var volumes: [VolumeInfo] = []
@@ -91,7 +103,8 @@ class VolumeManager: ObservableObject {
                         url: url,
                         name: volumeName,
                         isRemovable: isRemovable,
-                        isEjectable: isEjectable
+                        isEjectable: isEjectable,
+                        isLocal: isLocal
                     ))
                 }
             } catch {
@@ -99,7 +112,7 @@ class VolumeManager: ObservableObject {
             }
         }
 
-        mountedVolumes = volumes.sorted { $0.name < $1.name }
+        return volumes.sorted { $0.name < $1.name }
     }
 
     func ejectVolume(_ volume: VolumeInfo) {
@@ -111,10 +124,11 @@ class VolumeManager: ObservableObject {
     }
 }
 
-struct VolumeInfo: Identifiable, Equatable {
+struct VolumeInfo: Identifiable, Equatable, Sendable {
     let id = UUID()
     let url: URL
     let name: String
     let isRemovable: Bool
     let isEjectable: Bool
+    let isLocal: Bool
 }

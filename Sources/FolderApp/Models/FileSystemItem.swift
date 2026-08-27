@@ -7,7 +7,7 @@
 
 import Foundation
 
-struct FileSystemItem: Identifiable, Codable, Equatable, Hashable {
+struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
     let id: UUID
     let path: URL
     var name: String
@@ -21,7 +21,7 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable {
     let parentPath: URL?
     let isSymlink: Bool
 
-    enum FileType: String, Codable {
+    enum FileType: String, Codable, Sendable {
         case file
         case folder
         case symlink
@@ -105,6 +105,26 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable {
         self.isRecent = isRecent
         self.parentPath = parentPath
         self.isSymlink = isSymlink
+    }
+
+    /// Directory enumerations create fresh value objects. Preserve the ID of
+    /// an item already visible at the same path so SwiftUI does not tear down
+    /// and rebuild every row/tile on a background watcher refresh.
+    func preservingIdentity(_ stableID: UUID) -> FileSystemItem {
+        FileSystemItem(
+            id: stableID,
+            path: path,
+            name: name,
+            type: type,
+            size: size,
+            modifiedAt: modifiedAt,
+            createdAt: createdAt,
+            tags: tags,
+            isFavorite: isFavorite,
+            isRecent: isRecent,
+            parentPath: parentPath,
+            isSymlink: isSymlink
+        )
     }
 
     // Hashable conformance

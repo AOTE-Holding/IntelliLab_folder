@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>Folder</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIdentifier</key><string>BUNDLE_IDENTIFIER</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleName</key><string>Folder</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>APP_VERSION</string>
+    <key>CFBundleVersion</key><string>APP_VERSION</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>NSDesktopFolderUsageDescription</key><string>Folder needs access to browse files on your Desktop.</string>
+    <key>NSDocumentsFolderUsageDescription</key><string>Folder needs access to browse your documents.</string>
+    <key>NSDownloadsFolderUsageDescription</key><string>Folder needs access to browse your downloads.</string>
+    <key>NSAppleEventsUsageDescription</key><string>Folder uses automation only when you ask it to open Terminal or iTerm at a folder.</string>
+    <key>SUFeedURL</key><string>SPARKLE_FEED_URL</string>
+    <key>SUPublicEDKey</key><string>SPARKLE_PUBLIC_ED_KEY</string>
+    <key>SUEnableInstallerLauncherService</key><true/>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleURLName</key><string>BUNDLE_IDENTIFIER</string>
+        <key>CFBundleURLSchemes</key><array><string>folder</string></array>
+    </dict></array>
+    <key>CFBundleDocumentTypes</key>
+    <array><dict>
+        <key>CFBundleTypeName</key><string>Folder</string>
+        <key>CFBundleTypeRole</key><string>Viewer</string>
+        <key>LSHandlerRank</key><string>Default</string>
+        <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+    </dict></array>
+    <key>UTExportedTypeDeclarations</key>
+    <array><dict>
+        <key>UTTypeIdentifier</key><string>com.intellilab.folder.quicklook-list</string>
+        <key>UTTypeDescription</key><string>Folder Quick Look List</string>
+        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+        <key>UTTypeTagSpecification</key>
+        <dict>
+            <key>public.filename-extension</key><array><string>folderpreview</string></array>
+        </dict>
+    </dict></array>
+</dict>
+</plist>

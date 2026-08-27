@@ -12,9 +12,13 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @EnvironmentObject var settingsManager: SettingsManager
     @Environment(\.dismiss) var dismiss
+    @StateObject private var loginItemService = LoginItemService.shared
+    @StateObject private var folderDefaultHandlerService = FolderDefaultHandlerService.shared
+    @State private var showingMakeFolderDefaultConfirmation = false
+    @State private var showingRestoreFolderHandlerConfirmation = false
 
     var body: some View {
-        VStack(spacing: 20) {
+        VStack(spacing: 0) {
             // Header
             HStack {
                 Text("Settings")
@@ -28,12 +32,12 @@ struct SettingsView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.bottom, 10)
+            .padding(.bottom, 12)
 
             Divider()
 
-            // Settings Form
-            Form {
+            TabView {
+                Form {
                 // View Settings
                 Section(header: Text("View").font(.headline)) {
                     // Default View Mode
@@ -166,33 +170,29 @@ struct SettingsView: View {
                     }
                 }
 
-                // Terminal Settings
-                Section(header: Text("Terminal").font(.headline)) {
-                    HStack {
-                        Text("Default Terminal:")
-                        Spacer()
-                        Text(settingsManager.settings.terminalAppName)
-                            .foregroundColor(.secondary)
-                        Button("Choose...") {
-                            selectTerminalApp()
-                        }
-                        if settingsManager.settings.customTerminalPath != nil {
-                            Button("Reset") {
-                                settingsManager.settings.customTerminalPath = nil
-                            }
+                // Command-line tool settings
+                Section(header: Text("Command-line Tools").font(.headline)) {
+                    Picker("Default target:", selection: $settingsManager.settings.defaultTerminal) {
+                        ForEach(AppSettings.TerminalApp.supportedCases, id: \.self) { terminal in
+                            Text(terminal.rawValue).tag(terminal)
                         }
                     }
+                    .pickerStyle(.radioGroup)
 
-                    if settingsManager.settings.customTerminalPath == nil {
-                        Picker("Preset Terminals:", selection: $settingsManager.settings.defaultTerminal) {
-                            ForEach(AppSettings.TerminalApp.allCases, id: \.self) { terminal in
-                                Text(terminal.rawValue).tag(terminal)
+                    if settingsManager.settings.defaultTerminal == .custom {
+                        HStack(spacing: 8) {
+                            Text(settingsManager.settings.customTerminalPath?.deletingPathExtension().lastPathComponent ?? "No app selected")
+                                .foregroundColor(settingsManager.settings.customTerminalPath == nil ? .secondary : .primary)
+                                .lineLimit(1)
+                            Spacer()
+                            Button("Choose App…") {
+                                chooseCustomCommandLineApp()
                             }
                         }
-                        .pickerStyle(.radioGroup)
+                        .padding(.leading, 20)
                     }
 
-                    Text("Terminal app used for \"Open Terminal Here\" context menu option")
+                    Text("Used by \"Open Command Line Here\". Terminal and iTerm need macOS Automation; Warp, Ghostty, cmux, tmux, Kitty and Alacritty use their native launch path.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 20)
@@ -202,22 +202,65 @@ struct SettingsView: View {
                 Section(header: Text("System").font(.headline)) {
                     Toggle("Show Menu Bar Icon", isOn: $settingsManager.settings.showMenuBarIcon)
 
-                    Toggle("Launch at Login", isOn: $settingsManager.settings.launchAtLogin)
+                    Toggle("Launch at Login", isOn: Binding(
+                        get: { loginItemService.isEnabled },
+                        set: { loginItemService.setEnabled($0) }
+                    ))
 
-                    Text("Add Folder to Login Items in System Preferences > Users & Groups to launch at login")
+                    Text("Uses the native macOS Login Items service.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+
+                    Divider()
+
+                    Toggle("Enable Tabs", isOn: Binding(
+                        get: { settingsManager.settings.tabsEnabled ?? false },
+                        set: { settingsManager.settings.tabsEnabled = $0 }
+                    ))
+
+                    Text("Tabs are off by default. When enabled, use Command-1 through Command-9 to switch tabs, Command-T to create one and Command-W to close one.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 20)
+
+                    Divider()
+
+                    Toggle("Use Folder as the default app for folders", isOn: Binding(
+                        get: { folderDefaultHandlerService.isFolderDefault },
+                        set: { shouldUseFolder in
+                            if shouldUseFolder {
+                                showingMakeFolderDefaultConfirmation = true
+                            } else {
+                                showingRestoreFolderHandlerConfirmation = true
+                            }
+                        }
+                    ))
+
+                    Text("Folder will open directories, while PDFs, Word files and other documents keep their current default apps. Finder remains responsible for macOS system actions such as “Show in Finder”.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .padding(.leading, 20)
                 }
             }
             .formStyle(.grouped)
+            .tabItem { Label("General", systemImage: "gearshape") }
+
+                PermissionsCenterView()
+                    .tabItem { Label("Permissions", systemImage: "lock.shield") }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
             // Footer with buttons
             HStack {
                 Button("Reset to Defaults") {
+                    // A reset must reset the real Login Item as well, not
+                    // merely the saved toggle shown in this window.
+                    loginItemService.setEnabled(false)
                     settingsManager.reset()
+                    loginItemService.refresh()
                 }
                 .buttonStyle(.bordered)
 
@@ -229,23 +272,58 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.defaultAction)
             }
+            .padding(.top, 12)
         }
         .padding(20)
-        .frame(width: 550, height: 700)
+        .frame(width: 640, height: 720)
+        .onAppear {
+            folderDefaultHandlerService.refresh()
+        }
+        .alert("Launch at Login", isPresented: Binding(
+            get: { loginItemService.errorMessage != nil },
+            set: { if !$0 { loginItemService.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { loginItemService.errorMessage = nil }
+        } message: {
+            Text(loginItemService.errorMessage ?? "Unknown error")
+        }
+        .alert("Use Folder for folders?", isPresented: $showingMakeFolderDefaultConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Use Folder") {
+                folderDefaultHandlerService.makeFolderDefault()
+            }
+        } message: {
+            Text("Folder will become the default app for opening directories. Your document apps will not change.")
+        }
+        .alert("Restore the previous folder app?", isPresented: $showingRestoreFolderHandlerConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Restore") {
+                folderDefaultHandlerService.restorePreviousHandler()
+            }
+        } message: {
+            Text("Folder will no longer be the default app for opening directories.")
+        }
+        .alert("Folder Default App", isPresented: Binding(
+            get: { folderDefaultHandlerService.errorMessage != nil },
+            set: { if !$0 { folderDefaultHandlerService.clearError() } }
+        )) {
+            Button("OK", role: .cancel) { folderDefaultHandlerService.clearError() }
+        } message: {
+            Text(folderDefaultHandlerService.errorMessage ?? "Unknown error")
+        }
     }
 
-    private func selectTerminalApp() {
+    private func chooseCustomCommandLineApp() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
-        panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
-        panel.title = "Select Terminal Application"
-        panel.message = "Choose a terminal application to use for \"Open Terminal Here\""
-
-        if panel.runModal() == .OK, let url = panel.url {
-            settingsManager.settings.customTerminalPath = url
-        }
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose"
+        panel.message = "Choose the app Folder should open for “Open Command Line Here”."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        settingsManager.settings.customTerminalPath = url
     }
 }
 
@@ -286,4 +364,5 @@ struct ModifierToggle: View {
         }
         .buttonStyle(.plain)
     }
+
 }

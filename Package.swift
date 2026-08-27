@@ -15,20 +15,28 @@ let package = Package(
         )
     ],
     dependencies: [
-        // Add external dependencies here if needed later
-        // e.g., Sparkle for auto-updates
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4"),
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
     ],
     targets: [
         .executableTarget(
             name: "FolderApp",
-            dependencies: [],
-            path: "Sources/FolderApp",
-            resources: [
-                .process("Resources")
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
+            path: "Sources/FolderApp",
             swiftSettings: [
                 .enableUpcomingFeature("BareSlashRegexLiterals")
             ]
+        ),
+        .testTarget(
+            name: "FolderAppTests",
+            dependencies: [
+                "FolderApp",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation")
+            ],
+            path: "Tests/FolderAppTests"
         )
     ]
 )

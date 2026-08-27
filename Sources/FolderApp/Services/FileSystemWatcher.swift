@@ -2,7 +2,7 @@ import Foundation
 import Combine
 
 /// Service that monitors file system changes in a directory and notifies observers
-class FileSystemWatcher: ObservableObject {
+final class FileSystemWatcher: ObservableObject, @unchecked Sendable {
     // MARK: - Published Properties
 
     /// Published signal that fires when changes are detected
@@ -22,6 +22,12 @@ class FileSystemWatcher: ObservableObject {
     /// Starts watching a directory for file system changes
     /// - Parameter url: The directory URL to watch
     func startWatching(url: URL) {
+        let normalizedURL = url.standardizedFileURL
+        if currentPath?.standardizedFileURL == normalizedURL,
+           dispatchSource != nil {
+            return
+        }
+
         // Stop any existing watch
         stopWatching()
 
@@ -32,10 +38,10 @@ class FileSystemWatcher: ObservableObject {
             return
         }
 
-        currentPath = url
+        currentPath = normalizedURL
 
         // Open file descriptor for the directory
-        let path = url.path
+        let path = normalizedURL.path
         let fd = open(path, O_EVTONLY)
 
         guard fd >= 0 else {
@@ -45,15 +51,11 @@ class FileSystemWatcher: ObservableObject {
         fileDescriptor = fd
 
         // Create dispatch source to monitor file system events
-        guard let source = DispatchSource.makeFileSystemObjectSource(
+        let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
             eventMask: [.write, .delete, .extend, .rename],
             queue: watchQueue
-        ) as? DispatchSourceFileSystemObject else {
-            close(fd)
-            fileDescriptor = nil
-            return
-        }
+        )
 
         // Set up event handler with smart batching
         source.setEventHandler { [weak self] in
@@ -62,9 +64,10 @@ class FileSystemWatcher: ObservableObject {
 
         // Set up cancellation handler
         source.setCancelHandler { [weak self] in
-            guard let self = self, let fd = self.fileDescriptor else { return }
             close(fd)
-            self.fileDescriptor = nil
+            if self?.fileDescriptor == fd {
+                self?.fileDescriptor = nil
+            }
         }
 
         dispatchSource = source
@@ -80,6 +83,7 @@ class FileSystemWatcher: ObservableObject {
         // Cancel dispatch source
         dispatchSource?.cancel()
         dispatchSource = nil
+        fileDescriptor = nil
 
         currentPath = nil
     }

@@ -1,6 +1,11 @@
 import Foundation
 import AppKit
 import QuickLookThumbnailing
+import ImageIO
+
+private struct SendableCGImage: @unchecked Sendable {
+    let value: CGImage
+}
 
 /// Service for generating thumbnails for images and PDFs
 @MainActor
@@ -69,39 +74,26 @@ class ThumbnailService: ObservableObject {
             return await generateQuickLookThumbnail(path: path, size: size)
         }
 
-        // Load and resize image entirely on background thread
-        return await Task.detached {
-            guard let image = NSImage(contentsOfFile: path) else {
-                return nil as NSImage?
+        let image = await Task.detached(priority: .utility) {
+            let url = URL(fileURLWithPath: path) as CFURL
+            guard let source = CGImageSourceCreateWithURL(url, nil) else { return nil as SendableCGImage? }
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: Int(max(size.width, size.height) * 2)
+            ]
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                return nil
             }
-
-            let thumbnail = NSImage(size: size)
-            thumbnail.lockFocus()
-
-            let imageSize = image.size
-            let aspectRatio = imageSize.width / imageSize.height
-            var drawRect = CGRect(origin: .zero, size: size)
-
-            if aspectRatio > (size.width / size.height) {
-                let newHeight = size.width / aspectRatio
-                drawRect.origin.y = (size.height - newHeight) / 2
-                drawRect.size.height = newHeight
-            } else {
-                let newWidth = size.height * aspectRatio
-                drawRect.origin.x = (size.width - newWidth) / 2
-                drawRect.size.width = newWidth
-            }
-
-            image.draw(in: drawRect, from: .zero, operation: .copy, fraction: 1.0)
-            thumbnail.unlockFocus()
-
-            return thumbnail
+            return SendableCGImage(value: cgImage)
         }.value
+        guard let image else { return nil }
+        return NSImage(cgImage: image.value, size: size)
     }
 
     /// Generate thumbnail using Quick Look Thumbnailing service
     private func generateQuickLookThumbnail(path: URL, size: CGSize) async -> NSImage? {
-        return await withCheckedContinuation { continuation in
+        let image = await withCheckedContinuation { (continuation: CheckedContinuation<SendableCGImage?, Never>) in
             let request = QLThumbnailGenerator.Request(
                 fileAt: path,
                 size: size,
@@ -110,13 +102,15 @@ class ThumbnailService: ObservableObject {
             )
 
             QLThumbnailGenerator.shared.generateRepresentations(for: request) { thumbnail, type, error in
-                if let thumbnail = thumbnail {
-                    continuation.resume(returning: thumbnail.nsImage)
+                if let thumbnail {
+                    continuation.resume(returning: SendableCGImage(value: thumbnail.cgImage))
                 } else {
                     continuation.resume(returning: nil)
                 }
             }
         }
+        guard let image else { return nil }
+        return NSImage(cgImage: image.value, size: size)
     }
 
     /// Generate thumbnail using Quick Look Thumbnailing service (path version)
@@ -128,12 +122,5 @@ class ThumbnailService: ObservableObject {
     /// Clear the thumbnail cache
     func clearCache() {
         cache.removeAllObjects()
-    }
-}
-
-// Extension to convert CGImage to NSImage
-extension QLThumbnailRepresentation {
-    var nsImage: NSImage {
-        return NSImage(cgImage: self.cgImage, size: NSSize(width: self.cgImage.width, height: self.cgImage.height))
     }
 }

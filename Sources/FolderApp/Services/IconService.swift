@@ -43,49 +43,20 @@ class IconService: ObservableObject {
             return Image(nsImage: cachedImage)
         }
 
-        // Return a generic icon immediately, load real one in background
-        let genericIcon: NSImage
-        switch item.type {
-        case .folder:
-            genericIcon = NSWorkspace.shared.icon(for: .folder)
-        case .symlink:
-            genericIcon = NSImage(systemSymbolName: "link", accessibilityDescription: nil) ?? NSImage()
-        case .file:
-            genericIcon = NSWorkspace.shared.icon(for: .item)
-        }
-
-        let resized = resizeImage(genericIcon, to: NSSize(width: size, height: size))
-
-        // Load real icon in background for next render
-        Task.detached(priority: .utility) { [weak self] in
-            guard let strongSelf = self else { return }
-            let realIcon = NSWorkspace.shared.icon(forFile: item.path.path)
-            await MainActor.run {
-                let resizedReal = strongSelf.resizeImage(realIcon, to: NSSize(width: size, height: size))
-                strongSelf.imageCache.setObject(resizedReal, forKey: cacheKey)
-                strongSelf.objectWillChange.send()
-            }
-        }
-
+        let icon = NSWorkspace.shared.icon(forFile: item.path.path)
+        let resized = resizeImage(icon, to: NSSize(width: size, height: size))
+        imageCache.setObject(resized, forKey: cacheKey)
         return Image(nsImage: resized)
     }
 
     /// Preload icons for an array of items
     func preloadIcons(for items: [FileSystemItem], size: CGFloat = 64) {
-        Task.detached(priority: .background) {
-            for item in items {
-                let cacheKey = "\(item.path.path)-\(Int(size))" as NSString
-
-                if await self.imageCache.object(forKey: cacheKey) != nil {
-                    continue
-                }
-
-                let icon = NSWorkspace.shared.icon(forFile: item.path.path)
-                await MainActor.run {
-                    let resized = self.resizeImage(icon, to: NSSize(width: size, height: size))
-                    self.imageCache.setObject(resized, forKey: cacheKey)
-                }
-            }
+        for item in items {
+            let cacheKey = "\(item.path.path)-\(Int(size))" as NSString
+            guard imageCache.object(forKey: cacheKey) == nil else { continue }
+            let icon = NSWorkspace.shared.icon(forFile: item.path.path)
+            let resized = resizeImage(icon, to: NSSize(width: size, height: size))
+            imageCache.setObject(resized, forKey: cacheKey)
         }
     }
 

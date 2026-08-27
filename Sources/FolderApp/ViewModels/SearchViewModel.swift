@@ -15,87 +15,124 @@ class SearchViewModel: ObservableObject {
     @Published var searchResults: [FileSystemItem] = []
     @Published var isSearching = false
     @Published var isSearchActive = false
+    @Published var errorMessage: String?
+    @Published private(set) var searchErrors: [String] = []
 
     // Selection state for search results
     @Published var selectedItems: Set<UUID> = []
-    @Published var lastSelectedItem: UUID?
+    var lastSelectedItem: UUID?
 
     private var searchTask: Task<Void, Never>?
     private let fileSystemService = FileSystemService.shared
 
-    // Debounce timer
-    private var debounceTimer: Timer?
     private let debounceDelay: TimeInterval = 0.15  // 150ms
+    private var searchGeneration = 0
 
     // MARK: - Search
 
     func search(in folder: URL, depth: Int = 2) {
         // Cancel previous search
         searchTask?.cancel()
-        debounceTimer?.invalidate()
+        searchGeneration += 1
+        let generation = searchGeneration
+        let query = searchQuery
 
         guard !searchQuery.isEmpty else {
             searchResults = []
             isSearching = false
+            errorMessage = nil
+            searchErrors = []
             return
         }
 
         isSearching = true
+        errorMessage = nil
+        searchErrors = []
+        let delay = debounceDelay
 
-        // Debounce the search
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceDelay, repeats: false) { [weak self] _ in
-            guard let self = self else { return }
-
-            self.searchTask = Task {
-                await self.performSearch(in: folder, depth: depth)
+        searchTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                guard let self else { return }
+                await self.performSearch(in: folder, query: query, depth: depth, generation: generation)
+            } catch {
+                return
             }
         }
     }
 
-    private func performSearch(in folder: URL, depth: Int) async {
-        var results: [FileSystemItem] = []
+    private func performSearch(in folder: URL, query: String, depth: Int, generation: Int) async {
+        let access = PermissionCenter.shared.beginAccess(to: folder)
+        let readableFolder = access?.url ?? folder
+        let service = fileSystemService
+        let output = await Task.detached(priority: .userInitiated) {
+            Self.searchRecursively(
+                in: readableFolder,
+                query: query,
+                currentDepth: 0,
+                maxDepth: depth,
+                service: service
+            )
+        }.value
+        access?.stop()
 
-        // Recursive search with depth limit
-        await searchRecursively(in: folder, currentDepth: 0, maxDepth: depth, results: &results)
-
-        // Update results on main thread
-        self.searchResults = results.sorted()
-        self.isSearching = false
+        guard generation == searchGeneration, !Task.isCancelled else { return }
+        searchResults = output.items.sorted()
+        searchErrors = output.errors
+        errorMessage = output.errors.first
+        isSearching = false
     }
 
-    private func searchRecursively(in folder: URL, currentDepth: Int, maxDepth: Int, results: inout [FileSystemItem]) async {
+    private nonisolated static func searchRecursively(
+        in folder: URL,
+        query: String,
+        currentDepth: Int,
+        maxDepth: Int,
+        service: FileSystemService
+    ) -> (items: [FileSystemItem], errors: [String]) {
         // Check if task was cancelled
         if Task.isCancelled {
-            return
+            return ([], [])
         }
 
         // Stop if we've reached max depth
         if currentDepth > maxDepth {
-            return
+            return ([], [])
         }
 
+        var results: [FileSystemItem] = []
+        var errors: [String] = []
         do {
-            let contents = try fileSystemService.contentsOfDirectory(at: folder, showHidden: false)
+            let contents = try service.contentsOfDirectory(at: folder, showHidden: false)
 
             for item in contents {
                 // Check if task was cancelled
                 if Task.isCancelled {
-                    return
+                    return (results, errors)
                 }
 
                 // Check if filename matches (case-insensitive substring match)
-                if item.name.localizedCaseInsensitiveContains(searchQuery) {
+                if item.name.localizedCaseInsensitiveContains(query) {
                     results.append(item)
                 }
 
                 // Recursively search in subdirectories
                 if item.type == .folder {
-                    await searchRecursively(in: item.path, currentDepth: currentDepth + 1, maxDepth: maxDepth, results: &results)
+                    let nested = searchRecursively(
+                        in: item.path,
+                        query: query,
+                        currentDepth: currentDepth + 1,
+                        maxDepth: maxDepth,
+                        service: service
+                    )
+                    results.append(contentsOf: nested.items)
+                    errors.append(contentsOf: nested.errors.prefix(max(0, 20 - errors.count)))
                 }
             }
         } catch {
-            // Silently handle errors (permission denied, etc.)
+            errors.append("Could not search \(folder.path): \(error.localizedDescription)")
         }
+        return (results, errors)
     }
 
     func clearSearch() {
@@ -105,8 +142,10 @@ class SearchViewModel: ObservableObject {
         isSearchActive = false
         selectedItems = []
         lastSelectedItem = nil
+        errorMessage = nil
+        searchErrors = []
         searchTask?.cancel()
-        debounceTimer?.invalidate()
+        searchGeneration += 1
     }
 
     func activateSearch() {
@@ -131,6 +170,17 @@ class SearchViewModel: ObservableObject {
     func clearSelection() {
         selectedItems = []
         lastSelectedItem = nil
+    }
+
+    func selectOnly(_ item: FileSystemItem) {
+        QuickLookManager.shared.prioritizePreview(for: item)
+        if selectedItems == [item.id] {
+            lastSelectedItem = item.id
+            return
+        }
+
+        selectedItems = [item.id]
+        lastSelectedItem = item.id
     }
 
     func selectRange(from startItem: FileSystemItem, to endItem: FileSystemItem) {
@@ -219,28 +269,7 @@ class SearchViewModel: ObservableObject {
     func deleteSelectedItems() {
         let itemsToDelete = searchResults.filter { selectedItems.contains($0.id) }
         guard !itemsToDelete.isEmpty else { return }
-
-        var sourceURLs: [URL] = []
-        var trashURLs: [URL] = []
-
-        for item in itemsToDelete {
-            var trashNSURL: NSURL?
-            try? FileManager.default.trashItem(at: item.path, resultingItemURL: &trashNSURL)
-            sourceURLs.append(item.path)
-            if let trashURL = trashNSURL as URL? {
-                trashURLs.append(trashURL)
-            }
-        }
-
-        if sourceURLs.count == trashURLs.count && !sourceURLs.isEmpty {
-            ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                type: .trash, sourceURLs: sourceURLs, destinationURLs: trashURLs
-            ))
-        }
-
-        // Remove trashed items from search results
-        let trashedPaths = Set(sourceURLs)
-        searchResults.removeAll { trashedPaths.contains($0.path) }
+        FileOperationCoordinator.shared.moveToTrash(itemsToDelete.map(\.path))
         selectedItems.removeAll()
         lastSelectedItem = nil
     }

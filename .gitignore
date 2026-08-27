@@ -42,3 +42,6 @@ Sources/FolderApp/Version.swift
 
 # Temporary files
 *.tmp
+
+# Local agent planning and session state
+.omo/

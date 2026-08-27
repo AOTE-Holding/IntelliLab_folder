@@ -79,15 +79,26 @@ class SidebarManager: ObservableObject {
 
     // MARK: - Favorites
 
-    func addFavorite(_ path: URL, name: String? = nil, icon: String = "folder.fill") {
+    func addFavorite(
+        _ path: URL,
+        name: String? = nil,
+        icon: String = "folder.fill",
+        at index: Int? = nil
+    ) {
+        let standardizedPath = path.standardizedFileURL
+        guard !favorites.contains(where: { $0.path.standardizedFileURL == standardizedPath }) else {
+            return
+        }
         let favoriteName = name ?? path.lastPathComponent
         let favorite = Favorite(
             path: path,
             name: favoriteName,
             icon: icon,
-            order: favorites.count
+            order: 0
         )
-        favorites.append(favorite)
+        let insertionIndex = min(max(index ?? favorites.count, 0), favorites.count)
+        favorites.insert(favorite, at: insertionIndex)
+        normalizeFavoriteOrder()
         saveFavorites()
     }
 
@@ -105,9 +116,7 @@ class SidebarManager: ObservableObject {
         favorites.insert(item, at: to)
 
         // Recreate favorites with updated order values
-        favorites = favorites.enumerated().map { index, favorite in
-            Favorite(id: favorite.id, path: favorite.path, name: favorite.name, icon: favorite.icon, order: index)
-        }
+        normalizeFavoriteOrder()
 
         saveFavorites()
     }
@@ -121,6 +130,12 @@ class SidebarManager: ObservableObject {
 
     func isFavorite(_ path: URL) -> Bool {
         return favorites.contains { $0.path == path }
+    }
+
+    private func normalizeFavoriteOrder() {
+        favorites = favorites.enumerated().map { index, favorite in
+            Favorite(id: favorite.id, path: favorite.path, name: favorite.name, icon: favorite.icon, order: index)
+        }
     }
 
     // MARK: - Recent Locations
@@ -211,39 +226,34 @@ class SidebarManager: ObservableObject {
     }
 
     private func addGoogleDriveIfMissing() {
-        // Check if Google Drive is already in favorites
-        let hasGoogleDrive = favorites.contains { $0.name == "Google Drive" }
-        if hasGoogleDrive {
-            return
+        guard !favorites.contains(where: { $0.name == "Google Drive" }) else { return }
+        Task { [weak self] in
+            let driveURL = await Task.detached(priority: .utility) {
+                Self.discoverGoogleDrive()
+            }.value
+            guard let self,
+                  let driveURL,
+                  !favorites.contains(where: { $0.name == "Google Drive" }) else { return }
+            addFavorite(driveURL, name: "Google Drive", icon: "cloud.fill")
         }
+    }
 
-        // Try to find and add Google Drive
+    nonisolated private static func discoverGoogleDrive() -> URL? {
         let fileManager = FileManager.default
         let homeURL = fileManager.homeDirectoryForCurrentUser
-
-        // Modern Google Drive Desktop app location
         let cloudStorageURL = homeURL.appendingPathComponent("Library/CloudStorage")
-        if fileManager.fileExists(atPath: cloudStorageURL.path) {
-            do {
-                let contents = try fileManager.contentsOfDirectory(at: cloudStorageURL, includingPropertiesForKeys: nil)
-                // Find any Google Drive folder
-                if let googleDriveFolder = contents.first(where: { $0.lastPathComponent.starts(with: "GoogleDrive-") }) {
-                    let myDriveURL = googleDriveFolder.appendingPathComponent("My Drive")
-                    if fileManager.fileExists(atPath: myDriveURL.path) {
-                        addFavorite(myDriveURL, name: "Google Drive", icon: "cloud.fill")
-                        return
-                    }
-                }
-            } catch {
-                // Silently fail if we can't read CloudStorage directory
+        if let contents = try? fileManager.contentsOfDirectory(
+            at: cloudStorageURL,
+            includingPropertiesForKeys: nil
+        ), let googleDriveFolder = contents.first(where: { $0.lastPathComponent.starts(with: "GoogleDrive-") }) {
+            let myDriveURL = googleDriveFolder.appendingPathComponent("My Drive")
+            if fileManager.fileExists(atPath: myDriveURL.path) {
+                return myDriveURL
             }
         }
 
-        // Legacy Google Drive location
         let legacyGoogleDriveURL = homeURL.appendingPathComponent("Google Drive")
-        if fileManager.fileExists(atPath: legacyGoogleDriveURL.path) {
-            addFavorite(legacyGoogleDriveURL, name: "Google Drive", icon: "cloud.fill")
-        }
+        return fileManager.fileExists(atPath: legacyGoogleDriveURL.path) ? legacyGoogleDriveURL : nil
     }
 
     private func addDefaultFavorites() {
@@ -255,48 +265,15 @@ class SidebarManager: ObservableObject {
 
         // Desktop
         let desktopURL = homeURL.appendingPathComponent("Desktop")
-        if fileManager.fileExists(atPath: desktopURL.path) {
-            addFavorite(desktopURL, name: "Desktop", icon: "desktopcomputer")
-        }
+        addFavorite(desktopURL, name: "Desktop", icon: "desktopcomputer")
 
         // Documents
         let documentsURL = homeURL.appendingPathComponent("Documents")
-        if fileManager.fileExists(atPath: documentsURL.path) {
-            addFavorite(documentsURL, name: "Documents", icon: "doc.fill")
-        }
+        addFavorite(documentsURL, name: "Documents", icon: "doc.fill")
 
         // Downloads
         let downloadsURL = homeURL.appendingPathComponent("Downloads")
-        if fileManager.fileExists(atPath: downloadsURL.path) {
-            addFavorite(downloadsURL, name: "Downloads", icon: "arrow.down.circle.fill")
-        }
-
-        // Google Drive (check multiple possible locations)
-        // Modern Google Drive Desktop app location
-        let cloudStorageURL = homeURL.appendingPathComponent("Library/CloudStorage")
-        if fileManager.fileExists(atPath: cloudStorageURL.path) {
-            do {
-                let contents = try fileManager.contentsOfDirectory(at: cloudStorageURL, includingPropertiesForKeys: nil)
-                // Find any Google Drive folder
-                if let googleDriveFolder = contents.first(where: { $0.lastPathComponent.starts(with: "GoogleDrive-") }) {
-                    let myDriveURL = googleDriveFolder.appendingPathComponent("My Drive")
-                    if fileManager.fileExists(atPath: myDriveURL.path) {
-                        addFavorite(myDriveURL, name: "Google Drive", icon: "cloud.fill")
-                    }
-                }
-            } catch {
-                // Silently fail if we can't read CloudStorage directory
-            }
-        }
-
-        // Legacy Google Drive location
-        let legacyGoogleDriveURL = homeURL.appendingPathComponent("Google Drive")
-        if fileManager.fileExists(atPath: legacyGoogleDriveURL.path) {
-            // Only add if we didn't already add the modern location
-            let hasModernGoogleDrive = favorites.contains { $0.name == "Google Drive" }
-            if !hasModernGoogleDrive {
-                addFavorite(legacyGoogleDriveURL, name: "Google Drive", icon: "cloud.fill")
-            }
-        }
+        addFavorite(downloadsURL, name: "Downloads", icon: "arrow.down.circle.fill")
+        addGoogleDriveIfMissing()
     }
 }
