@@ -7,12 +7,14 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct SidebarView: View {
     @ObservedObject var sidebarManager: SidebarManager
     @ObservedObject var fileExplorerViewModel: FileExplorerViewModel
     @EnvironmentObject var settingsManager: SettingsManager
     @StateObject private var volumeManager = VolumeManager.shared
+    @StateObject private var tagIndex = TagIndex.shared
     @State private var showAllRecent = false
     @State private var favoritesExpanded = true
     @State private var devicesExpanded = true
@@ -133,18 +135,22 @@ struct SidebarView: View {
             if settingsManager.settings.showColorTagsSection {
                 SidebarSection(title: "Tags", isExpanded: $tagsExpanded) {
                     ForEach(ColorTag.TagColor.allCases, id: \.self) { color in
-                        let count = sidebarManager.colorTags.filter { $0.value.color == color }.count
+                        let count = tagIndex.count(of: color)
                         SidebarTagCategoryItem(
                             color: color,
                             count: count,
                             isSelected: fileExplorerViewModel.tagFilterMode == color
                         ) {
-                            if count > 0 {
-                                if fileExplorerViewModel.tagFilterMode == color {
-                                    fileExplorerViewModel.exitTagFilterMode()
-                                } else {
-                                    fileExplorerViewModel.showFilesWithTag(color)
-                                }
+                            // Zweiter Klick auf dieselbe Farbe führt wieder heraus —
+                            // das ersetzt den früheren Exit-Knopf in der Kopfzeile.
+                            //
+                            // Der Ausstieg gilt bewusst auch bei Zähler 0: nimmt man
+                            // der letzten Datei ihre Farbe, während die Ansicht offen
+                            // ist, wäre die Zeile sonst tot und niemand käme mehr raus.
+                            if fileExplorerViewModel.tagFilterMode == color {
+                                fileExplorerViewModel.exitTagFilterMode()
+                            } else if count > 0 {
+                                fileExplorerViewModel.showFilesWithTag(color)
                             }
                         }
                     }
@@ -155,6 +161,11 @@ struct SidebarView: View {
         }
         // The split view owns the width. Filling that width keeps the sidebar
         // background continuous while labels naturally truncate like Finder.
+        // Die Sidebar beginnt oben links im Fenster — genau dort, wo macOS
+        // seine Ampelknöpfe setzt. Ohne diesen Abstand lief ihr erster Eintrag
+        // unter ihnen durch. Gemessen statt angenommen: im Vollbild gibt es
+        // die Knöpfe nicht, dann ist der Abstand null.
+        .padding(.top, WindowControls.topInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.folderSidebar)
         .coordinateSpace(name: "sidebarFavoriteDropArea")
@@ -540,38 +551,45 @@ struct SidebarTagCategoryItem: View {
     let isSelected: Bool
     let action: () -> Void
 
+    // Bewusst kein `Button`: dessen eigene Klickgeste greift den Mauszug ab,
+    // und das Ziehen der Farbe beginnt dann nie. Klick und Zug übernimmt
+    // stattdessen `ColorTagDragSource` — dieselbe Aufteilung wie bei den
+    // Datei-Kacheln, wo AppKit ebenfalls beides in einer Hand hat.
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color(hex: color.rawValue))
-                    .frame(width: 12, height: 12)
-                    .overlay(
-                        Circle()
-                            .stroke(Color.primary.opacity(0.2), lineWidth: 0.5)
-                    )
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color(hex: color.rawValue))
+                .frame(width: 12, height: 12)
+                .overlay(
+                    Circle()
+                        .stroke(Color.primary.opacity(0.2), lineWidth: 0.5)
+                )
 
-                Text(color.displayName)
-                    .font(.system(size: 13))
-                    .foregroundColor(count > 0 ? .primary : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .layoutPriority(1)
+            Text(color.displayName)
+                .font(.system(size: 13))
+                .foregroundColor(count > 0 ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(1)
 
-                Spacer()
+            Spacer()
 
-                if count > 0 {
-                    Text("\(count)")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
+            if count > 0 {
+                Text("\(count)")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(isSelected ? Color.folderAccent.opacity(0.1) : Color.clear)
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(isSelected ? Color.folderAccent.opacity(0.1) : Color.clear)
+        .contentShape(Rectangle())
+        // Klick und Zug laufen beide über diese Fläche. Sie liegt oben auf,
+        // damit der Zug beginnt, bevor SwiftUI den Klick für sich verbucht.
+        .overlay {
+            ColorTagDragSource(color: color, onClick: action)
+        }
+        .help("Auf eine Datei ziehen, um sie zu markieren")
     }
 }
 

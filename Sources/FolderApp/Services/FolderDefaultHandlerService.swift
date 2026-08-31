@@ -21,7 +21,7 @@ final class FolderDefaultHandlerService: ObservableObject {
 
     private init() {
         registry = SystemFolderHandlerRegistry()
-        defaults = .standard
+        defaults = ConfigStore.shared
         bundleIdentifier = Bundle.main.bundleIdentifier
         bundleURL = Bundle.main.bundleURL
         refresh()

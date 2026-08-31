@@ -10,7 +10,6 @@ import Foundation
 struct AppSettings: Codable {
     var defaultViewMode: DisplayMode
     var showHiddenFiles: Bool
-    var autoSaveSearchHistory: Bool
     var lastOpenedFolder: URL?
     var theme: Theme
     var iconSize: Int  // 32-128px
@@ -87,7 +86,6 @@ struct AppSettings: Codable {
     static let `default` = AppSettings(
         defaultViewMode: .iconGrid,
         showHiddenFiles: true,
-        autoSaveSearchHistory: false,
         lastOpenedFolder: FileManager.default.homeDirectoryForCurrentUser,
         theme: .system,
         iconSize: 64,
@@ -107,13 +105,51 @@ struct AppSettings: Codable {
     )
 }
 
+// MARK: - Nachsichtiges Lesen
+//
+// Die synthetisierte Codable-Umsetzung ist alles-oder-nichts: fehlt EIN Feld,
+// scheitert der ganze Vorgang und der Nutzer steht wieder auf den Werkseinstellungen.
+// Genau so gehen Einstellungen bei jedem Update verloren, das ein Feld ergänzt —
+// `tabsEnabled` wurde deshalb schon einmal nachträglich optional gemacht.
+//
+// Deshalb wird jedes Feld einzeln gelesen und fällt für sich auf den Standard
+// zurück. Ein neues Feld kostet damit nie mehr als seinen eigenen Standardwert.
+extension AppSettings {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let standard = AppSettings.default
+
+        func lies<T: Decodable>(_ key: CodingKeys, _ ersatz: T) -> T {
+            (try? c.decodeIfPresent(T.self, forKey: key)) .flatMap { $0 } ?? ersatz
+        }
+
+        defaultViewMode = lies(.defaultViewMode, standard.defaultViewMode)
+        showHiddenFiles = lies(.showHiddenFiles, standard.showHiddenFiles)
+        lastOpenedFolder = lies(.lastOpenedFolder, standard.lastOpenedFolder)
+        theme = lies(.theme, standard.theme)
+        iconSize = lies(.iconSize, standard.iconSize)
+        keyboardShortcuts = lies(.keyboardShortcuts, standard.keyboardShortcuts)
+        globalHotkey = lies(.globalHotkey, standard.globalHotkey)
+        launchAtLogin = lies(.launchAtLogin, standard.launchAtLogin)
+        showMenuBarIcon = lies(.showMenuBarIcon, standard.showMenuBarIcon)
+        tabsEnabled = lies(.tabsEnabled, standard.tabsEnabled)
+        showSidebar = lies(.showSidebar, standard.showSidebar)
+        showFavoritesSection = lies(.showFavoritesSection, standard.showFavoritesSection)
+        showRecentSection = lies(.showRecentSection, standard.showRecentSection)
+        showColorTagsSection = lies(.showColorTagsSection, standard.showColorTagsSection)
+        showGoogleDriveInFavorites = lies(.showGoogleDriveInFavorites, standard.showGoogleDriveInFavorites)
+        undoRedoEnabled = lies(.undoRedoEnabled, standard.undoRedoEnabled)
+        defaultTerminal = lies(.defaultTerminal, standard.defaultTerminal)
+        customTerminalPath = lies(.customTerminalPath, standard.customTerminalPath)
+    }
+}
+
 struct KeyboardShortcuts: Codable {
     var searchEnabled: Bool
     var navigationEnabled: Bool
     var arrowKeysEnabled: Bool
 
     // Modifier keys
-    var searchModifier: KeyModifier
     var navigationModifier: KeyModifier
 
     enum KeyModifier: String, Codable {
@@ -138,13 +174,11 @@ struct KeyboardShortcuts: Codable {
         searchEnabled: Bool = true,
         navigationEnabled: Bool = true,
         arrowKeysEnabled: Bool = true,
-        searchModifier: KeyModifier = .command,
         navigationModifier: KeyModifier = .command
     ) {
         self.searchEnabled = searchEnabled
         self.navigationEnabled = navigationEnabled
         self.arrowKeysEnabled = arrowKeysEnabled
-        self.searchModifier = searchModifier
         self.navigationModifier = navigationModifier
     }
 }
@@ -198,7 +232,7 @@ class SettingsManager: ObservableObject {
         }
     }
 
-    private let defaults = UserDefaults.standard
+    private let defaults = ConfigStore.shared
     private let settingsKey = "com.folder.settings"
 
     private init() {

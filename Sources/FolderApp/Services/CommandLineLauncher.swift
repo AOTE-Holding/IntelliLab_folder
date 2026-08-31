@@ -34,12 +34,18 @@ final class CommandLineLauncher {
         case .warp:
             openWarp(at: directory)
         case .ghostty:
-            launchBundledApplication(
-                bundleIdentifier: "com.mitchellh.ghostty",
-                appName: "Ghostty",
-                executableName: "ghostty",
-                arguments: ["--working-directory=\(directory.path)"],
-                at: directory
+            // Ghostty lässt sich auf macOS NICHT über sein CLI-Programm starten
+            // — das sagt sein eigenes `--help`. Der Aufruf beendet sich dort mit
+            // Erfolg und tut nichts; lief Ghostty schon, kam nur ein Fenster im
+            // zuletzt benutzten Ordner nach vorne. Genau so sah der Fehler aus.
+            //
+            // Eine Prüfung des Rückgabewerts hätte das nicht gefangen: der
+            // Aufruf meldet 0. Der dokumentierte Weg ist, der App den Ordner zu
+            // übergeben — nachgemessen, das Fenster startet darin.
+            openDirectory(
+                directory,
+                withApplicationNamed: "Ghostty",
+                bundleIdentifier: "com.mitchellh.ghostty"
             )
         case .cmux:
             openCMux(at: directory)
@@ -138,6 +144,19 @@ final class CommandLineLauncher {
             return
         }
         openDirectory(directory, with: applicationURL)
+    }
+
+    /// Übergibt der App den Ordner — das Gegenstück zu `open -a App <Ordner>`.
+    private func openDirectory(
+        _ directory: URL,
+        withApplicationNamed appName: String,
+        bundleIdentifier: String
+    ) {
+        guard let appURL = applicationURL(bundleIdentifier: bundleIdentifier, appName: appName) else {
+            report("\(appName) is not installed. Choose another command-line target in Settings.")
+            return
+        }
+        openDirectory(directory, with: appURL)
     }
 
     private func openDirectory(_ directory: URL, with applicationURL: URL) {

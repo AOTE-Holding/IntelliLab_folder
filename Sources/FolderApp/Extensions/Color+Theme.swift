@@ -86,5 +86,13 @@ struct FolderChromeButtonStyle: ButtonStyle {
 
 extension NSColor {
     static let folderAccent = NSColor(red: 0x00 / 255.0, green: 0xA9 / 255.0, blue: 0x8F / 255.0, alpha: 1.0)
-    static let folderSidebar = NSColor(red: 22/255, green: 29/255, blue: 38/255, alpha: 1.0)
+
+    /// Der Fenstergrund. Folgt dem eingestellten Erscheinungsbild — als fester
+    /// dunkler Wert liess er jedes Fenster dunkel bleiben, auch wenn „Light"
+    /// gewählt war. Die Farbwerte sind dieselben wie bei `Color.folderSidebar`.
+    static let folderSidebar = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .vibrantDark]) != nil
+            ? NSColor(red: 22/255, green: 29/255, blue: 38/255, alpha: 1)
+            : NSColor(red: 245/255, green: 245/255, blue: 247/255, alpha: 1)
+    }
 }

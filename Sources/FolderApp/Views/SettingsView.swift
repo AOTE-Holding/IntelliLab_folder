@@ -16,6 +16,7 @@ struct SettingsView: View {
     @StateObject private var folderDefaultHandlerService = FolderDefaultHandlerService.shared
     @State private var showingMakeFolderDefaultConfirmation = false
     @State private var showingRestoreFolderHandlerConfirmation = false
+    @StateObject private var navigation = SettingsNavigation.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,7 +37,7 @@ struct SettingsView: View {
 
             Divider()
 
-            TabView {
+            TabView(selection: $navigation.selectedTab) {
                 Form {
                 // View Settings
                 Section(header: Text("View").font(.headline)) {
@@ -245,9 +246,11 @@ struct SettingsView: View {
             }
             .formStyle(.grouped)
             .tabItem { Label("General", systemImage: "gearshape") }
+            .tag(SettingsNavigation.Tab.general)
 
                 PermissionsCenterView()
                     .tabItem { Label("Permissions", systemImage: "lock.shield") }
+                    .tag(SettingsNavigation.Tab.permissions)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 

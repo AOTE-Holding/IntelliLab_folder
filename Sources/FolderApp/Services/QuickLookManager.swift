@@ -82,7 +82,7 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
     private var pendingProgrammaticPreviewContentSizes: [NSSize] = []
 
     private override init() {
-        let defaults = UserDefaults.standard
+        let defaults = ConfigStore.shared
         let storedWidth = defaults.double(forKey: Self.standardPreviewWidthKey)
         let storedHeight = defaults.double(forKey: Self.standardPreviewHeightKey)
         let storedSize = NSSize(width: storedWidth, height: storedHeight)
@@ -681,8 +681,26 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
     nonisolated func previewPanel(_ panel: QLPreviewPanel!, sourceFrameOnScreenFor item: QLPreviewItem!) -> NSRect {
         guard let url = Self.sourceURL(for: item) else { return .zero }
         return MainActor.assumeIsolated {
-            return sources[url.standardizedFileURL]?.frame ?? .zero
+            if let frame = sources[url.standardizedFileURL]?.frame {
+                return frame
+            }
+            // Kein bekanntes Ziel: die Datei liegt gerade nicht sichtbar im
+            // Fenster. `.zero` liesse die Vorschau in die Bildschirmecke
+            // zusammenfallen — sie klappt stattdessen in die Mitte des
+            // Browserfensters zusammen, also dorthin, wo die Datei liegt.
+            return fallbackSourceFrame()
         }
+    }
+
+    /// Ein Ersatzziel für die Schliess-Bewegung, wenn die Kachel der Datei
+    /// gerade nicht sichtbar ist.
+    private func fallbackSourceFrame() -> NSRect {
+        guard let window = NSApp.windows.first(where: {
+            $0.isVisible && !($0 is QLPreviewPanel)
+        }) else { return .zero }
+
+        let mitte = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        return NSRect(x: mitte.x - 32, y: mitte.y - 32, width: 64, height: 64)
     }
 
     nonisolated func previewPanel(_ panel: QLPreviewPanel!, transitionImageFor item: QLPreviewItem!, contentRect: UnsafeMutablePointer<NSRect>!) -> Any! {
@@ -715,8 +733,8 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
 
             guard size.width >= 480, size.height >= 360 else { return }
             standardPreviewContentSize = size
-            UserDefaults.standard.set(size.width, forKey: Self.standardPreviewWidthKey)
-            UserDefaults.standard.set(size.height, forKey: Self.standardPreviewHeightKey)
+            ConfigStore.shared.set(size.width, forKey: Self.standardPreviewWidthKey)
+            ConfigStore.shared.set(size.height, forKey: Self.standardPreviewHeightKey)
         }
     }
 

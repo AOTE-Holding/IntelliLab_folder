@@ -27,12 +27,16 @@ struct FileGridView: View {
     @State private var clickTracker = GridClickTracker()
     @State private var springLoadedItemID: UUID?
     @State private var springLoadGeneration = 0
+    @State private var tagDropTargetID: UUID?
     @FocusState private var renamingFocusedID: UUID?
 
-    private let spacing: CGFloat = 16
+    private let spacing: CGFloat = GridColumnMath.spacing
     private let clickPauseInterval: TimeInterval = 0.5 // Time window for click-pause-click
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: CGFloat(viewModel.viewMode.iconSize + 40)), spacing: spacing)]
+        [GridItem(
+            .adaptive(minimum: GridColumnMath.itemMinimum(iconSize: viewModel.viewMode.iconSize)),
+            spacing: spacing
+        )]
     }
 
     var body: some View {
@@ -40,55 +44,11 @@ struct FileGridView: View {
             SortingToolbar(viewModel: viewModel)
 
             GeometryReader { geometry in
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVGrid(columns: columns, spacing: spacing) {
                         ForEach(viewModel.items) { item in
-                        FileGridItemWithRename(
-                            item: item,
-                            isSelected: viewModel.isSelected(item),
-                            isRenaming: false,
-                            clipboardManager: clipboardManager,
-                            isDimmed: showDimmed,
-                            viewModel: viewModel,
-                            onSingleClick: { handleSingleClick(item) },
-                            onDoubleClick: { handleDoubleClick(item) },
-                            renamingFocusedID: $renamingFocusedID
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.18 : 0))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .stroke(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.85 : 0), lineWidth: 1.5)
-                                )
-                                .allowsHitTesting(false)
-                                .animation(
-                                    springLoadedItemID == item.id
-                                        ? .easeInOut(duration: 0.38).repeatForever(autoreverses: true)
-                                        : .easeOut(duration: 0.12),
-                                    value: springLoadedItemID == item.id
-                                )
-                        }
-                        .overlay {
-                            Color.clear.multiFileDrag(
-                                urls: viewModel.isSelected(item)
-                                    ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
-                                    : [item.path],
-                                enabled: true,
-                                dropDestination: item.type == .folder ? item.path : nil,
-                                onDropFiles: { sources, forceCopy in
-                                    endSpringLoading(item)
-                                    operationCoordinator.drop(sources, into: item.path, forceCopy: forceCopy)
-                                },
-                                onDragEntered: { beginSpringLoading(item) },
-                                onDragExited: { endSpringLoading(item) },
-                                onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
-                                onDoubleClick: { handleDoubleClick(item) }
-                            )
-                        }
-                        .contextMenu {
-                            FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
-                        }
+                        tile(for: item)
                         }
                     }
                     .padding()
@@ -125,12 +85,101 @@ struct FileGridView: View {
                     }
                     .disabled(!clipboardManager.hasClipboardContent())
                 }
+                .reportsGridColumns(iconSize: viewModel.viewMode.iconSize) { columns in
+                    viewModel.gridColumnsPerRow = columns
+                }
+                // Die Auswahl bleibt sichtbar. Ohne das wanderte sie beim
+                // Blättern mit den Pfeiltasten aus dem Bild — und die Vorschau
+                // fand beim Schliessen kein Ziel mehr, zu dem sie zurückzoomen
+                // konnte, weil eine unsichtbare Kachel ihre Position abmeldet.
+                .onChange(of: viewModel.selectedItems) { auswahl in
+                    guard auswahl.count == 1, let ziel = auswahl.first else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(ziel)
+                    }
+                }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onDeleteCommand {
             viewModel.deleteSelectedItems()
         }
+    }
+
+    /// Eine Kachel mit allem, was daran hängt.
+    ///
+    /// Ausgelagert, weil der Compiler den Ausdruck im `body` sonst nicht mehr in
+    /// vertretbarer Zeit prüfen kann — SwiftUI-Ansichten tragen ihren Typ im
+    /// Rückgabewert, und der wächst mit jedem Modifikator.
+    @ViewBuilder
+    private func tile(for item: FileSystemItem) -> some View {
+            FileGridItemWithRename(
+                item: item,
+                isSelected: viewModel.isSelected(item),
+                isRenaming: false,
+                clipboardManager: clipboardManager,
+                isDimmed: showDimmed,
+                viewModel: viewModel,
+                onSingleClick: { handleSingleClick(item) },
+                onDoubleClick: { handleDoubleClick(item) },
+                renamingFocusedID: $renamingFocusedID
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.18 : 0))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.85 : 0), lineWidth: 1.5)
+                    )
+                    .allowsHitTesting(false)
+                    .animation(
+                        springLoadedItemID == item.id
+                            ? .easeInOut(duration: 0.38).repeatForever(autoreverses: true)
+                            : .easeOut(duration: 0.12),
+                        value: springLoadedItemID == item.id
+                    )
+            }
+            .overlay {
+                Color.clear.multiFileDrag(
+                    urls: viewModel.isSelected(item)
+                        ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
+                        : [item.path],
+                    enabled: true,
+                    dropDestination: item.type == .folder ? item.path : nil,
+                    onDropFiles: { sources, forceCopy in
+                        endSpringLoading(item)
+                        operationCoordinator.drop(sources, into: item.path, forceCopy: forceCopy)
+                    },
+                    onDragEntered: { beginSpringLoading(item) },
+                    onDragExited: { endSpringLoading(item) },
+                    onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
+                    onDoubleClick: { handleDoubleClick(item) },
+                    onColorTagDrop: { farbe in
+                        viewModel.applyColorTag(farbe, to: tagDropTargets(for: item))
+                    },
+                    onColorTagHover: { aktiv in
+                        if aktiv {
+                            tagDropTargetID = item.id
+                        } else if tagDropTargetID == item.id {
+                            tagDropTargetID = nil
+                        }
+                    }
+                )
+            }
+            .contextMenu {
+                FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
+            }
+            // Eine Farbe aus der Sidebar hierher fallen lassen markiert
+            // die Datei. Der Rahmen zeigt vorher, welche Kachel trifft.
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(
+                        Color.folderAccent.opacity(tagDropTargetID == item.id ? 0.9 : 0),
+                        lineWidth: 2
+                    )
+                    .allowsHitTesting(false)
+            }
     }
 
     private func dropFilesIntoCurrentFolder(_ providers: [NSItemProvider]) -> Bool {
@@ -153,6 +202,15 @@ struct FileGridView: View {
             operationCoordinator.drop(sources, into: viewModel.currentPath, forceCopy: forceCopy)
         }
         return true
+    }
+
+    /// Worauf ein fallengelassener Tag wirkt.
+    ///
+    /// Wie in Finder: Trifft er eine Datei, die Teil der Auswahl ist, bekommt
+    /// die ganze Auswahl die Farbe. Trifft er eine andere, nur diese eine.
+    private func tagDropTargets(for item: FileSystemItem) -> [FileSystemItem] {
+        guard viewModel.selectedItems.contains(item.id) else { return [item] }
+        return viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
     }
 
     private func beginSpringLoading(_ item: FileSystemItem) {
@@ -183,37 +241,6 @@ struct FileGridView: View {
 
     private func openTerminal(at path: URL) {
         CommandLineLauncher.shared.open(at: path, settings: settingsManager.settings)
-    }
-
-    private func openCustomTerminal(_ terminalURL: URL, at path: URL) {
-        // Use AppleScript for Terminal.app specifically
-        if terminalURL.path.contains("Terminal.app") {
-            let script = """
-                tell application "Terminal"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-        } else if terminalURL.path.contains("iTerm") {
-            let script = """
-                tell application "iTerm"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-        } else {
-            // For other terminals, try opening with the path
-            let config = NSWorkspace.OpenConfiguration()
-            NSWorkspace.shared.open([path], withApplicationAt: terminalURL, configuration: config)
-        }
     }
 
     private func handleSingleClick(
@@ -262,6 +289,7 @@ struct FileGridItemWithRename: View {
     @StateObject private var iconService = IconService.shared
     @StateObject private var thumbnailService = ThumbnailService.shared
     @State private var thumbnail: NSImage?
+    @State private var icon: NSImage?
 
     var body: some View {
         if isRenaming {
@@ -276,7 +304,7 @@ struct FileGridItemWithRename: View {
                             .frame(width: CGFloat(viewModel.viewMode.iconSize), height: CGFloat(viewModel.viewMode.iconSize))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     } else {
-                        iconService.swiftUIIcon(for: item, size: CGFloat(viewModel.viewMode.iconSize))
+                        Image(nsImage: icon ?? iconService.icon(for: item, size: CGFloat(viewModel.viewMode.iconSize)))
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(width: CGFloat(viewModel.viewMode.iconSize), height: CGFloat(viewModel.viewMode.iconSize))
@@ -313,6 +341,15 @@ struct FileGridItemWithRename: View {
             .frame(width: CGFloat(viewModel.viewMode.iconSize + 40) + 16)
             .transaction { $0.animation = nil }
             .task {
+                // Das echte Symbol kommt abseits des Hauptthreads nach — im
+                // Bildaufbau darf es nie geholt werden.
+                if let geladen = await iconService.loadIcon(
+                    for: item,
+                    size: CGFloat(viewModel.viewMode.iconSize)
+                ) {
+                    icon = geladen
+                }
+
                 // Load thumbnail when entering rename mode
                 if thumbnailService.supportsThumbnail(for: item.path.path) {
                     thumbnail = await thumbnailService.getThumbnail(for: item.path.path, size: CGSize(width: 128, height: 128))
@@ -335,18 +372,21 @@ struct FileGridItem: View {
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var thumbnailService = ThumbnailService.shared
     @State private var thumbnail: NSImage?
+    @State private var icon: NSImage?
 
     private var isCut: Bool {
         clipboardManager.clipboardAction == .cut &&
         clipboardManager.clipboardItems.contains(where: { $0.path == item.path })
     }
 
+    /// Kommt aus dem Einlesen des Ordners. Pro Kachel auf die Platte zu gehen
+    /// wuerde bei tausend Dateien tausend Zugriffe je Bildaufbau kosten.
     private var colorTag: ColorTag? {
-        sidebarManager.getColorTag(for: item.path)
+        item.colorTag.map { ColorTag(color: $0, name: $0.displayName) }
     }
 
     private var quickLookTransitionImage: NSImage {
-        thumbnail ?? iconService.icon(for: item, size: iconSize)
+        thumbnail ?? icon ?? iconService.icon(for: item, size: iconSize)
     }
 
     private var opacity: Double {
@@ -372,7 +412,7 @@ struct FileGridItem: View {
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
                     // Show regular icon
-                    iconService.swiftUIIcon(for: item, size: iconSize)
+                    Image(nsImage: icon ?? iconService.icon(for: item, size: iconSize))
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: iconSize, height: iconSize)
@@ -426,6 +466,15 @@ struct FileGridItem: View {
         .contentShape(Rectangle())
         .transaction { $0.animation = nil }
         .task {
+            // Das echte Symbol kommt abseits des Hauptthreads nach. Im
+            // Bildaufbau selbst darf es nie geholt werden — gemessen kostete
+            // das 99 ms fuer 50 Dateien und war der spuerbare Moment beim
+            // Oeffnen eines Ordners. Bis es da ist, steht das Symbol der
+            // Dateiart, das nichts kostet.
+            if let geladen = await iconService.loadIcon(for: item, size: iconSize) {
+                icon = geladen
+            }
+
             // Load thumbnail for images and PDFs
             if thumbnailService.supportsThumbnail(for: item.path.path) {
                 thumbnail = await thumbnailService.getThumbnail(for: item.path.path, size: CGSize(width: 128, height: 128))
@@ -558,6 +607,27 @@ struct FileContextMenu: View {
 
         Divider()
 
+        Menu("Tags") {
+            ForEach(ColorTag.TagColor.allCases, id: \.self) { color in
+                Button {
+                    // Ein Klick auf die bereits gesetzte Farbe nimmt sie wieder
+                    // herunter — wie in Finder, und wie der zweite Klick auf
+                    // dieselbe Farbe in der Sidebar aus der Tag-Ansicht führt.
+                    // Deshalb gibt es keinen eigenen Eintrag zum Entfernen mehr.
+                    applyTag(currentTag == color ? nil : color)
+                } label: {
+                    // Der Haken zeigt, was gesetzt ist. Ohne ihn wüsste niemand,
+                    // welcher Klick entfernt statt setzt.
+                    Label(
+                        currentTag == color ? "\(colorName(for: color)) ✓" : colorName(for: color),
+                        systemImage: "circle.fill"
+                    )
+                }
+            }
+        }
+
+        Divider()
+
         Button("Move to Trash", role: .destructive) { moveToTrash() }
 
         Button("Rename…") {
@@ -590,6 +660,22 @@ struct FileContextMenu: View {
         operationCoordinator.moveToTrash(items.map(\.path))
     }
 
+    /// Die Farbe der angeklickten Datei. Steht sie in einer Mehrfachauswahl,
+    /// zeigt der Haken trotzdem ihre eigene — sie ist die, auf die geklickt wurde.
+    private var currentTag: ColorTag.TagColor? {
+        item.colorTag
+    }
+
+    /// Setzt die Farbe auf alle ausgewählten Dateien, sonst auf die angeklickte.
+    private func applyTag(_ color: ColorTag.TagColor?) {
+        let ziele = isItemSelected
+            ? effectiveItems.filter { effectiveSelectedIDs.contains($0.id) }
+            : [item]
+
+        viewModel.applyColorTag(color, to: ziele)
+        searchViewModel?.refreshTagsIfNeeded()
+    }
+
     private func openWith(appURL: URL) {
         let configuration = NSWorkspace.OpenConfiguration()
         NSWorkspace.shared.open([item.path], withApplicationAt: appURL, configuration: configuration)
@@ -600,7 +686,7 @@ struct FileContextMenu: View {
         let script = """
             tell application "Finder"
                 activate
-                open information window of (POSIX file "\(item.path.path)" as alias)
+                open information window of (POSIX file \(AppleScriptLiteral.quoted(item.path.path)) as alias)
             end tell
             """
 
@@ -624,37 +710,6 @@ struct FileContextMenu: View {
 
     private func openTerminal(at path: URL) {
         CommandLineLauncher.shared.open(at: path, settings: settingsManager.settings)
-    }
-
-    private func openCustomTerminal(_ terminalURL: URL, at path: URL) {
-        // Use AppleScript for Terminal.app specifically
-        if terminalURL.path.contains("Terminal.app") {
-            let script = """
-                tell application "Terminal"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-        } else if terminalURL.path.contains("iTerm") {
-            let script = """
-                tell application "iTerm"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-        } else {
-            // For other terminals, try opening with the path
-            let config = NSWorkspace.OpenConfiguration()
-            NSWorkspace.shared.open([path], withApplicationAt: terminalURL, configuration: config)
-        }
     }
 
     private func duplicateItems() {

@@ -34,6 +34,12 @@ struct NavigationBar: View {
     @FocusState private var navigationButtonFocused: Bool?
     @Namespace private var focusNamespace
 
+    /// Ob die Sidebar gerade wirklich zu sehen ist — abgeschaltet und
+    /// eingeklappt sind zwei Wege zum selben Bild.
+    private var isSidebarVisible: Bool {
+        settingsManager.settings.showSidebar && !isSidebarCollapsed
+    }
+
     var body: some View {
         HStack(spacing: 6) {
             // Sidebar toggle button
@@ -45,6 +51,16 @@ struct NavigationBar: View {
             .buttonStyle(FolderChromeButtonStyle())
             .help(isSidebarCollapsed ? "Show sidebar" : "Hide sidebar")
             .accessibilityLabel(isSidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+
+            // Der Umschalter gehört zur Sidebar, die Pfeile zur Navigation.
+            // Der Strich trennt die beiden — aber nur, solange es die Sidebar
+            // zu sehen gibt. Ist sie zu, trennt er nichts mehr und macht die
+            // Leiste am Fensterrand nur unruhig.
+            if isSidebarVisible {
+                Divider()
+                    .frame(height: 20)
+                    .padding(.horizontal, 2)
+            }
 
             // Back button
             Button(action: { viewModel.navigateBack() }) {
@@ -339,6 +355,14 @@ struct NavigationBar: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .frame(height: 48)
+        // Nur bei eingeklappter Sidebar beginnt die Leiste am Fensterrand —
+        // dort, wo macOS seine Ampelknöpfe setzt. Ist die Sidebar offen, hält
+        // sie den Abstand schon selbst.
+        //
+        // Die Einrückung sitzt bewusst HIER, nach dem Hintergrund: davor hätte
+        // sie nur den Inhalt verschoben, während die helle Fläche weiter unter
+        // den Knöpfen durchgelaufen wäre.
+        .padding(.leading, isSidebarVisible ? 0 : WindowControls.leadingInset)
         .onChange(of: viewModel.currentPath) { newPath in
             // Reset editing state when path changes externally
             if isEditingPath {

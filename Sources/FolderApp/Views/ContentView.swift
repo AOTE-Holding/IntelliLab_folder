@@ -204,6 +204,17 @@ struct FolderBrowserView: View {
                 mainContentArea
             }
         }
+        // Der Griff bleibt am Rand stehen, wenn die Sidebar zu ist — sonst gäbe
+        // es keinen Weg mehr, sie dort aufzuziehen. Er liegt bewusst ÜBER dem
+        // Inhalt: der Trennbereich hat eingeklappt keine Breite mehr, also
+        // bliebe darunter kein Platz, an dem er sichtbar wäre.
+        .overlay(alignment: .leading) {
+            if settingsManager.settings.showSidebar && sidebarIsManuallyCollapsed {
+                SidebarRevealGrip {
+                    sidebarIsManuallyCollapsed = false
+                }
+            }
+        }
         .overlay {
             if viewModel.isProcessing {
                 VStack(spacing: 8) {
@@ -242,9 +253,11 @@ struct FolderBrowserView: View {
             // Add to recent locations when navigating
             sidebarManager.addRecentLocation(newPath)
 
-            // Deactivate search when navigating to a new path
-            if searchViewModel.isSearchActive {
-                searchViewModel.deactivateSearch()
+            // Die Suche wird beim Weggehen geparkt und beim Zurückkommen
+            // wiederhergestellt — statt gelöscht. Beide Richtungen laufen über
+            // diese eine Stelle, damit sie nicht auseinanderlaufen können.
+            if !searchViewModel.resumeIfParked(at: newPath) {
+                searchViewModel.park()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .appSettingsDidChange)) { _ in
@@ -254,6 +267,20 @@ struct FolderBrowserView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(searchViewModel.searchErrors.joined(separator: "\n"))
+        }
+        // Ein Tag, der nicht geschrieben werden konnte, war vorher nicht von
+        // einem zu unterscheiden, der einfach nicht ankam. Jetzt sagt die App,
+        // was schiefging.
+        .alert(
+            "Tag nicht gesetzt",
+            isPresented: Binding(
+                get: { sidebarManager.lastTagError != nil },
+                set: { if !$0 { sidebarManager.lastTagError = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { sidebarManager.lastTagError = nil }
+        } message: {
+            Text(sidebarManager.lastTagError ?? "")
         }
     }
 
@@ -670,35 +697,14 @@ struct FolderBrowserView: View {
 
     // MARK: - Grid Navigation Helper
 
+    /// Die Spaltenzahl, die das Gitter zuletzt gemeldet hat.
+    ///
+    /// Wurde früher aus `NSApp.keyWindow.frame`, der gespeicherten
+    /// Sidebar-Breite und angenommenen Innenabständen nachgerechnet. Jede
+    /// dieser drei Grössen konnte danebenliegen, und schon eine Spalte
+    /// Abweichung liess Pfeil hoch/runter schräg springen. Siehe `GridColumns.swift`.
     private func calculateGridColumns() -> Int {
-        // Calculate columns to match LazyVGrid's adaptive layout
-        guard let window = NSApp.keyWindow else { return 4 }
-
-        let windowWidth = window.frame.width
-        let visibleSidebarWidth: CGFloat = settingsManager.settings.showSidebar
-            && !sidebarIsManuallyCollapsed
-            && windowWidth > SidebarSplitMetrics.collapseWindowWidth
-            ? CGFloat(UserDefaults.standard.double(forKey: SidebarSplitMetrics.widthKey))
-            : 0
-        let dividerWidth: CGFloat = visibleSidebarWidth > 0 ? SidebarSplitMetrics.dividerWidth : 0
-
-        // Available width for grid content
-        let availableWidth = windowWidth - visibleSidebarWidth - dividerWidth
-
-        // Grid uses .padding() which is default 16px on each side
-        let horizontalPadding: CGFloat = 16 * 2
-        let contentWidth = availableWidth - horizontalPadding
-
-        // Grid item sizing: minimum = iconSize + 40, spacing = 16
-        let iconSize = CGFloat(viewModel.viewMode.iconSize)
-        let itemMinWidth = iconSize + 40
-        let spacing: CGFloat = 16
-
-        // Calculate how many items fit: (contentWidth + spacing) / (itemMinWidth + spacing)
-        // We add spacing to contentWidth because the last item doesn't have trailing spacing
-        let columns = max(1, Int((contentWidth + spacing) / (itemMinWidth + spacing)))
-
-        return columns
+        max(viewModel.gridColumnsPerRow, 1)
     }
 
     private func navigateIntoSelectedFolder() {
@@ -852,7 +858,7 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
         splitView.addSubview(sidebarHost)
         splitView.addSubview(detailHost)
 
-        let saved = CGFloat(UserDefaults.standard.double(forKey: SidebarSplitMetrics.widthKey))
+        let saved = CGFloat(ConfigStore.shared.double(forKey: SidebarSplitMetrics.widthKey))
         let initialWidth = saved > 0 ? saved : SidebarSplitMetrics.defaultWidth
         splitView.setPosition(
             min(max(initialWidth, SidebarSplitMetrics.minimumWidth), SidebarSplitMetrics.maximumWidth),
@@ -923,7 +929,11 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
             constrainMinCoordinate proposedMinimumPosition: CGFloat,
             ofSubviewAt dividerIndex: Int
         ) -> CGFloat {
-            isActuallyCollapsed ? 0 : SidebarSplitMetrics.minimumWidth
+            // Immer 0: sonst blockiert die Mindestbreite die Bewegung schon
+            // beim Ziehen, und die Sidebar liesse sich nie zuziehen. Ob eine
+            // Position gültig ist, entscheidet `constrainSplitPosition` —
+            // entweder zu, oder mindestens so breit wie die Mindestbreite.
+            0
         }
 
         func splitView(
@@ -944,6 +954,15 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
             ofSubviewAt dividerIndex: Int
         ) -> CGFloat {
             guard !isActuallyCollapsed else { return 0 }
+
+            // Weit genug nach links gezogen heisst zu — und zwar in denselben
+            // Zustand, den der Knopf in der Leiste erzeugt. Vorher klebte die
+            // Sidebar an ihrer Mindestbreite und liess sich nur ueber den Knopf
+            // schliessen.
+            if proposedPosition < SidebarSplitMetrics.minimumWidth / 2 {
+                return 0
+            }
+
             let constrained = clamped(proposedPosition, in: splitView)
             if abs(constrained - SidebarSplitMetrics.magneticWidth) <= SidebarSplitMetrics.magneticRange {
                 return SidebarSplitMetrics.magneticWidth
@@ -990,7 +1009,7 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
             pendingSave?.cancel()
             let width = sidebar.frame.width
             let save = DispatchWorkItem {
-                UserDefaults.standard.set(Double(width), forKey: SidebarSplitMetrics.widthKey)
+                ConfigStore.shared.set(Double(width), forKey: SidebarSplitMetrics.widthKey)
             }
             pendingSave = save
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: save)
@@ -1001,11 +1020,21 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
 private final class FolderNativeSplitView: NSSplitView {
     var revealCollapsedSidebar: ((FolderNativeSplitView) -> Bool)?
 
-    override var dividerThickness: CGFloat { SidebarSplitMetrics.dividerWidth }
+    private var sidebarIsCollapsed: Bool { (subviews.first?.frame.width ?? 0) < 1 }
+
+    /// Ist die Sidebar zu, nimmt der Trennbereich keine Breite ein.
+    ///
+    /// Sonst bliebe am linken Fensterrand ein Streifen über die volle Höhe
+    /// stehen — mit Trennlinie und Griff darin, obwohl links davon nichts mehr
+    /// ist. Aufziehen geht weiterhin: den Randbereich fängt `mouseDown` selbst
+    /// ab, und der Umschalter in der Leiste tut es ohnehin.
+    override var dividerThickness: CGFloat {
+        sidebarIsCollapsed ? 0 : SidebarSplitMetrics.dividerWidth
+    }
 
     override func mouseDown(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
-        let isCollapsed = subviews.first?.frame.width ?? 0 < 1
+        let isCollapsed = sidebarIsCollapsed
         let revealZoneWidth = max(dividerThickness + 4, 12)
         guard isCollapsed, location.x <= revealZoneWidth,
               let revealCollapsedSidebar else {
@@ -1050,21 +1079,79 @@ private final class FolderNativeSplitView: NSSplitView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        // A subtle visual affordance remains on the collapsed left edge.
-        guard subviews.first?.frame.width ?? 0 < 1 else { return }
-        let grip = NSRect(x: 1, y: bounds.midY - 17, width: 3, height: 34)
-        NSColor.secondaryLabelColor.withAlphaComponent(0.55).setFill()
-        NSBezierPath(roundedRect: grip, xRadius: 1.5, yRadius: 1.5).fill()
+        // Bei zugeklappter Sidebar bleibt der Rand leer. Ein Griff dort wäre
+        // der einzige sichtbare Rest eines Bereichs, den es gerade nicht gibt.
     }
 
+    /// Zeichnet den Trennbereich vollständig selbst.
+    ///
+    /// Der Bereich ist acht Punkt breit, damit er sich gut greifen lässt. Wurde
+    /// nur eine Linie hineingezeichnet, blieben an seinen beiden Rändern die
+    /// Haarlinien stehen, die das System dort setzt — im hellen Erscheinungsbild
+    /// sah man deshalb zwei Striche nebeneinander statt einem. Im dunklen fiel
+    /// es nicht auf, weil dort alle drei kaum Kontrast haben.
+    ///
+    /// Deshalb wird die Fläche zuerst gefüllt. Was darunter lag, ist damit weg,
+    /// und es bleibt genau eine Trennlinie — die, die wir selbst setzen.
     override func drawDivider(in rect: NSRect) {
-        let separator = NSColor.separatorColor
-        separator.setFill()
-        NSRect(x: rect.midX.rounded(.down), y: rect.minY, width: 1, height: rect.height).fill()
+        NSColor.folderSidebar.setFill()
+        rect.fill()
+
+        NSColor.separatorColor.setFill()
+        NSRect(x: rect.maxX - 1, y: rect.minY, width: 1, height: rect.height).fill()
 
         let grip = NSRect(x: rect.midX - 1.5, y: rect.midY - 17, width: 3, height: 34)
         NSColor.secondaryLabelColor.withAlphaComponent(0.55).setFill()
         NSBezierPath(roundedRect: grip, xRadius: 1.5, yRadius: 1.5).fill()
+    }
+}
+
+/// Der Anfasser am linken Rand, wenn die Sidebar eingeklappt ist.
+///
+/// Der **ganze Rand** über die volle Höhe holt sie zurück, nicht nur der
+/// sichtbare Strich — ein vier Punkt breiter Balken lässt sich mit der Maus
+/// nicht zuverlässig treffen. Der Strich ist nur das, was man sieht; getroffen
+/// wird ein breiterer, unsichtbarer Streifen darum herum.
+///
+/// Klick genügt. Ein Zug nach rechts tut dasselbe, weil man es an einer solchen
+/// Kante zuerst probiert.
+private struct SidebarRevealGrip: View {
+    let reveal: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Color.clear
+                .frame(width: 12)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+
+            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
+                .fill(Color.secondary.opacity(isHovering ? 0.9 : 0.45))
+                .frame(width: isHovering ? 5 : 4, height: isHovering ? 56 : 44)
+                .padding(.leading, 2)
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .onHover { hovering in
+            isHovering = hovering
+            // Der Zeiger sagt, dass hier etwas aufzuziehen ist, bevor man klickt.
+            if hovering {
+                NSCursor.resizeRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .onTapGesture(perform: reveal)
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { zug in
+                    // Nur nach rechts — nach links gibt es nichts aufzuziehen.
+                    if zug.translation.width > 2 { reveal() }
+                }
+        )
+        .help("Sidebar aufziehen")
+        .accessibilityLabel("Sidebar aufziehen")
     }
 }
 
@@ -1117,9 +1204,12 @@ struct SearchResultsGridView: View {
     @ObservedObject var fileExplorerViewModel: FileExplorerViewModel
     @StateObject private var clipboardManager = ClipboardManager.shared
 
-    private let spacing: CGFloat = 16
+    private let spacing: CGFloat = GridColumnMath.spacing
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: CGFloat(fileExplorerViewModel.viewMode.iconSize + 40)), spacing: spacing)]
+        [GridItem(
+            .adaptive(minimum: GridColumnMath.itemMinimum(iconSize: fileExplorerViewModel.viewMode.iconSize)),
+            spacing: spacing
+        )]
     }
 
     var body: some View {
@@ -1162,6 +1252,9 @@ struct SearchResultsGridView: View {
                         searchViewModel.clearSelection()
                     }
             )
+        }
+        .reportsGridColumns(iconSize: fileExplorerViewModel.viewMode.iconSize) { columns in
+            fileExplorerViewModel.gridColumnsPerRow = columns
         }
     }
 
@@ -1280,10 +1373,6 @@ struct TagFilterResultsGridView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                     Spacer()
-                    Button("Exit") {
-                        viewModel.exitTagFilterMode()
-                    }
-                    .buttonStyle(.bordered)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -1311,7 +1400,17 @@ struct TagFilterResultsGridView: View {
                                     )
                                 }
                                 .contextMenu {
-                                    FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
+                                    // Die Tag-Ansicht zeigt Dateien aus dem ganzen
+                                    // Benutzerordner, nicht den aktuellen Ordner.
+                                    // Ohne diese Liste greift das Kontextmenue auf
+                                    // den falschen Bestand zu.
+                                    FileContextMenu(
+                                        item: item,
+                                        viewModel: viewModel,
+                                        clipboardManager: clipboardManager,
+                                        allItems: viewModel.tagFilteredItems,
+                                        selectedItemIDs: viewModel.selectedItems
+                                    )
                                 }
                         }
                     }
@@ -1368,10 +1467,6 @@ struct TagFilterResultsListView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                     Spacer()
-                    Button("Exit") {
-                        viewModel.exitTagFilterMode()
-                    }
-                    .buttonStyle(.bordered)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -1398,7 +1493,17 @@ struct TagFilterResultsListView: View {
                                     )
                                 }
                                 .contextMenu {
-                                    FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
+                                    // Die Tag-Ansicht zeigt Dateien aus dem ganzen
+                                    // Benutzerordner, nicht den aktuellen Ordner.
+                                    // Ohne diese Liste greift das Kontextmenue auf
+                                    // den falschen Bestand zu.
+                                    FileContextMenu(
+                                        item: item,
+                                        viewModel: viewModel,
+                                        clipboardManager: clipboardManager,
+                                        allItems: viewModel.tagFilteredItems,
+                                        selectedItemIDs: viewModel.selectedItems
+                                    )
                                 }
                         }
                     }

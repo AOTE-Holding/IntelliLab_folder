@@ -56,24 +56,41 @@ class SidebarManager: ObservableObject {
 
     @Published var favorites: [Favorite] = []
     @Published var recentLocations: [URL] = []
-    @Published var colorTags: [URL: ColorTag] = [:] // path -> tag mapping
+    /// Meldung, wenn ein Tag nicht auf die Datei geschrieben werden konnte —
+    /// etwa auf einem schreibgeschützten Volume.
+    @Published var lastTagError: String?
 
     private let favoritesKey = "favorites"
     private let recentLocationsKey = "recentLocations"
-    private let colorTagsKey = "colorTags"
     private let maxRecentLocations = 10
 
-    private init() {
-        loadFavorites()
-        loadRecentLocations()
-        loadColorTags()
+    /// Warum eine Liste leer ist. Das entscheidet, ob überschrieben werden darf.
+    ///
+    /// Der Unterschied ist der ganze Punkt: „hier lag noch nie etwas" rechtfertigt
+    /// Standardwerte, „hier liegt etwas, das ich nicht deuten kann" niemals. Wer
+    /// beides gleich behandelt, macht aus einem Lesefehler einen Datenverlust —
+    /// die Standardwerte werden gespeichert und überschreiben das Original.
+    private enum LoadResult {
+        case loaded
+        case nothingStored
+        case unreadable
+    }
 
-        // Add default favorites if empty
-        if favorites.isEmpty {
+    private init() {
+        let favoritesResult = loadFavorites()
+        loadRecentLocations()
+        migrateLegacyColorTagsOntoFiles()
+
+        switch favoritesResult {
+        case .nothingStored:
             addDefaultFavorites()
-        } else {
+        case .loaded:
             // Check and add Google Drive if it exists but isn't in favorites
             addGoogleDriveIfMissing()
+        case .unreadable:
+            // Nichts anfassen. Das Gespeicherte bleibt liegen und ist die
+            // einzige Chance, die Favoriten des Nutzers wiederzubekommen.
+            break
         }
     }
 
@@ -167,62 +184,92 @@ class SidebarManager: ObservableObject {
     }
 
     // MARK: - Color Tags
+    //
+    // Die Farbe liegt auf der Datei, als echter Finder-Tag. Diese beiden
+    // Methoden reichen nur durch — eine eigene Liste in den Einstellungen gibt
+    // es nicht mehr. Sie kannte Finder nicht und zeigte nach dem ersten
+    // Umbenennen ins Leere.
 
+    /// Einen Tag zu setzen heisst, die Datei zu verändern. Das braucht dieselbe
+    /// Erlaubnis wie jeder andere Schreibzugriff — auf Schreibtisch, Dokumente
+    /// und Downloads liegt sie in einem Lesezeichen, und ohne dessen Geltungs-
+    /// bereich lehnt macOS den Zugriff ab. Der Ordnerinhalt wird seit je so
+    /// gelesen; beim Tag fehlte es, und der Fehler ging still verloren.
     func setColorTag(for path: URL, tag: ColorTag?) {
-        if let tag = tag {
-            colorTags[path] = tag
-        } else {
-            colorTags.removeValue(forKey: path)
+        let access = PermissionCenter.shared.beginAccess(to: path)
+        defer { access?.stop() }
+
+        do {
+            try FinderTagService.setColorTag(tag?.color, for: access?.url ?? path)
+            TagIndex.shared.note(tag?.color, for: path)
+            lastTagError = nil
+        } catch {
+            lastTagError = "\(path.lastPathComponent) liess sich nicht markieren: "
+                + error.localizedDescription
         }
-        saveColorTags()
     }
 
     func getColorTag(for path: URL) -> ColorTag? {
-        return colorTags[path]
+        let access = PermissionCenter.shared.beginAccess(to: path)
+        defer { access?.stop() }
+
+        guard let farbe = FinderTagService.colorTag(for: access?.url ?? path) else { return nil }
+        return ColorTag(color: farbe, name: farbe.displayName)
     }
 
     // MARK: - Persistence
 
-    private func loadFavorites() {
-        guard let data = UserDefaults.standard.data(forKey: favoritesKey),
-              let decoded = try? JSONDecoder().decode([Favorite].self, from: data) else {
-            return
+    private var store: UserDefaults { ConfigStore.shared }
+
+    @discardableResult
+    private func loadFavorites() -> LoadResult {
+        guard let data = store.data(forKey: favoritesKey) else { return .nothingStored }
+        guard let decoded = try? JSONDecoder().decode([Favorite].self, from: data) else {
+            FileHandle.standardError.write(Data("Folder: favorites entry could not be read — leaving it untouched.\n".utf8))
+            return .unreadable
         }
         favorites = decoded
+        return .loaded
     }
 
     private func saveFavorites() {
         if let encoded = try? JSONEncoder().encode(favorites) {
-            UserDefaults.standard.set(encoded, forKey: favoritesKey)
+            store.set(encoded, forKey: favoritesKey)
         }
     }
 
-    private func loadRecentLocations() {
-        guard let data = UserDefaults.standard.data(forKey: recentLocationsKey),
-              let decoded = try? JSONDecoder().decode([URL].self, from: data) else {
-            return
+    @discardableResult
+    private func loadRecentLocations() -> LoadResult {
+        guard let data = store.data(forKey: recentLocationsKey) else { return .nothingStored }
+        guard let decoded = try? JSONDecoder().decode([URL].self, from: data) else {
+            return .unreadable
         }
         recentLocations = decoded
+        return .loaded
     }
 
     private func saveRecentLocations() {
         if let encoded = try? JSONEncoder().encode(recentLocations) {
-            UserDefaults.standard.set(encoded, forKey: recentLocationsKey)
+            store.set(encoded, forKey: recentLocationsKey)
         }
     }
 
-    private func loadColorTags() {
-        guard let data = UserDefaults.standard.data(forKey: colorTagsKey),
-              let decoded = try? JSONDecoder().decode([URL: ColorTag].self, from: data) else {
-            return
-        }
-        colorTags = decoded
-    }
+    /// Trägt die Tags der alten app-eigenen Liste einmalig auf die Dateien und
+    /// räumt sie danach weg.
+    ///
+    /// Setzen liess sich früher nur über die Sidebar, also sind es wenige. Ohne
+    /// diesen Schritt wären sie beim Umstieg auf echte Finder-Tags stillschweigend
+    /// verschwunden.
+    private func migrateLegacyColorTagsOntoFiles() {
+        let legacyKey = "colorTags"
+        guard let data = store.data(forKey: legacyKey),
+              let alte = try? JSONDecoder().decode([URL: ColorTag].self, from: data)
+        else { return }
 
-    private func saveColorTags() {
-        if let encoded = try? JSONEncoder().encode(colorTags) {
-            UserDefaults.standard.set(encoded, forKey: colorTagsKey)
+        for (pfad, tag) in alte where FinderTagService.colorTag(for: pfad) == nil {
+            try? FinderTagService.setColorTag(tag.color, for: pfad)
         }
+        store.removeObject(forKey: legacyKey)
     }
 
     private func addGoogleDriveIfMissing() {

@@ -26,6 +26,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             PermissionCenter.shared.resetAll()
         }
 
+        // Vor dem ersten Fenster: sonst erscheint es kurz im Systemwert und
+        // wechselt danach sichtbar auf das eingestellte Erscheinungsbild.
+        AppearanceController.start()
+
         setupMenu()
         Task { @MainActor in
             self.setupStatusBarIcon()
@@ -140,6 +144,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .openFolders, object: urls)
         }
+    }
+
+    /// Öffnet die Einstellungen direkt im Bereich Berechtigungen.
+    ///
+    /// Vorher hing dieser Menüpunkt an derselben Funktion wie „Settings…" und
+    /// landete deshalb immer im allgemeinen Bereich.
+    @MainActor @objc func showPermissions() {
+        SettingsNavigation.shared.selectedTab = .permissions
+        showSettings()
     }
 
     @MainActor @objc func showSettings() {
@@ -331,7 +344,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
 
         appMenu.addItem(withTitle: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
-        appMenu.addItem(withTitle: "Permissions...", action: #selector(showSettings), keyEquivalent: "")
+        appMenu.addItem(withTitle: "Permissions...", action: #selector(showPermissions), keyEquivalent: "")
         appMenu.addItem(withTitle: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Folder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

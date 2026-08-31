@@ -111,7 +111,8 @@ private struct FileInfoView: View {
         }
         .frame(width: 360, height: 430)
         .background(Color.folderBase)
-        .preferredColorScheme(.dark)
+        // Kein festes Dunkel: das Infofenster folgt dem eingestellten
+        // Erscheinungsbild wie jedes andere Fenster auch.
     }
 }
 

@@ -35,6 +35,10 @@
     </dict></array>
     <key>UTExportedTypeDeclarations</key>
     <array><dict>
+        <key>UTTypeIdentifier</key><string>com.intellilab.folder.color-tag</string>
+        <key>UTTypeDescription</key><string>Folder Color Tag</string>
+        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+    </dict><dict>
         <key>UTTypeIdentifier</key><string>com.intellilab.folder.quicklook-list</string>
         <key>UTTypeDescription</key><string>Folder Quick Look List</string>
         <key>UTTypeConformsTo</key><array><string>public.data</string></array>

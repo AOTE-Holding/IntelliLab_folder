@@ -169,7 +169,7 @@ class PermissionCenter: ObservableObject {
     @Published var lastError: String?
 
     private let fileManager = FileManager.default
-    private let defaults: UserDefaults = .standard
+    private let defaults: UserDefaults = ConfigStore.shared
 
     // Persistence keys
     private let userFoldersKey = "permissionCenter.userFolders"

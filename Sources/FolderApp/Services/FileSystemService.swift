@@ -27,7 +27,10 @@ final class FileSystemService: @unchecked Sendable {
                 .isSymbolicLinkKey,
                 .fileSizeKey,
                 .contentModificationDateKey,
-                .isHiddenKey
+                .isHiddenKey,
+                // Vorgeladen, damit der Farb-Tag jeder Datei aus demselben
+                // Durchgang kommt statt aus einem zweiten Zugriff pro Kachel.
+                .labelNumberKey
             ],
             options: []
         )

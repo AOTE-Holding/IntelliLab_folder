@@ -20,6 +20,10 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
     var isRecent: Bool
     let parentPath: URL?
     let isSymlink: Bool
+    /// Der Finder-Farb-Tag der Datei. Wird beim Einlesen des Ordners
+    /// mitgenommen — ein zweiter Gang auf die Platte pro Kachel wäre bei
+    /// tausend Dateien teuer.
+    var colorTag: ColorTag.TagColor?
 
     enum FileType: String, Codable, Sendable {
         case file
@@ -55,8 +59,11 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
             .isSymbolicLinkKey,
             .fileSizeKey,
             .contentModificationDateKey,
-            .creationDateKey
+            .creationDateKey,
+            .labelNumberKey
         ])
+
+        self.colorTag = FinderTagService.color(forLabelNumber: resourceValues.labelNumber)
 
         // Determine type
         if resourceValues.isSymbolicLink == true {
@@ -91,7 +98,8 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
         isFavorite: Bool = false,
         isRecent: Bool = false,
         parentPath: URL? = nil,
-        isSymlink: Bool = false
+        isSymlink: Bool = false,
+        colorTag: ColorTag.TagColor? = nil
     ) {
         self.id = id
         self.path = path
@@ -105,6 +113,7 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.isRecent = isRecent
         self.parentPath = parentPath
         self.isSymlink = isSymlink
+        self.colorTag = colorTag
     }
 
     /// Directory enumerations create fresh value objects. Preserve the ID of
@@ -123,7 +132,8 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
             isFavorite: isFavorite,
             isRecent: isRecent,
             parentPath: parentPath,
-            isSymlink: isSymlink
+            isSymlink: isSymlink,
+            colorTag: colorTag
         )
     }
 

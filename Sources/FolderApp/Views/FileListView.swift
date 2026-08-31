@@ -29,6 +29,7 @@ struct FileListView: View {
     @State private var scrollPosition: UUID?
     @State private var springLoadedItemID: UUID?
     @State private var springLoadGeneration = 0
+    @State private var tagDropTargetID: UUID?
 
     private let clickPauseInterval: TimeInterval = 0.5
 
@@ -37,55 +38,11 @@ struct FileListView: View {
             SortingToolbar(viewModel: viewModel)
 
             GeometryReader { geometry in
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(viewModel.items) { item in
-                        FileListRowWithRename(
-                            item: item,
-                            isSelected: viewModel.isSelected(item),
-                            isRenaming: false,
-                            clipboardManager: clipboardManager,
-                            fileExplorerViewModel: viewModel,
-                            isDimmed: showDimmed,
-                            onSingleClick: { handleSingleClick(item) },
-                            onDoubleClick: { handleDoubleClick(item) },
-                            renamingFocusedID: $renamingFocusedID
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.18 : 0))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.85 : 0), lineWidth: 1.5)
-                                )
-                                .allowsHitTesting(false)
-                                .animation(
-                                    springLoadedItemID == item.id
-                                        ? .easeInOut(duration: 0.38).repeatForever(autoreverses: true)
-                                        : .easeOut(duration: 0.12),
-                                    value: springLoadedItemID == item.id
-                                )
-                        }
-                        .overlay {
-                            Color.clear.multiFileDrag(
-                                urls: viewModel.isSelected(item)
-                                    ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
-                                    : [item.path],
-                                enabled: true,
-                                dropDestination: item.type == .folder ? item.path : nil,
-                                onDropFiles: { sources, forceCopy in
-                                    endSpringLoading(item)
-                                    operationCoordinator.drop(sources, into: item.path, forceCopy: forceCopy)
-                                },
-                                onDragEntered: { beginSpringLoading(item) },
-                                onDragExited: { endSpringLoading(item) },
-                                onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
-                                onDoubleClick: { handleDoubleClick(item) }
-                            )
-                        }
-                        .contextMenu {
-                            FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
-                        }
+                        row(for: item)
                         }
                     }
                     .padding(.horizontal)
@@ -122,12 +79,102 @@ struct FileListView: View {
                     }
                     .disabled(!clipboardManager.hasClipboardContent())
                 }
+                // Die Auswahl bleibt sichtbar — siehe die gleichlautende Stelle
+                // in FileGridView.
+                .onChange(of: viewModel.selectedItems) { auswahl in
+                    guard auswahl.count == 1, let ziel = auswahl.first else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(ziel)
+                    }
+                }
+                }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onDeleteCommand {
             viewModel.deleteSelectedItems()
         }
+    }
+
+    /// Eine Zeile mit allem, was daran hängt.
+    ///
+    /// Ausgelagert, weil der Compiler den Ausdruck im `body` sonst nicht mehr in
+    /// vertretbarer Zeit prüfen kann — jeder Modifikator vergrössert den Typ.
+    @ViewBuilder
+    private func row(for item: FileSystemItem) -> some View {
+            FileListRowWithRename(
+                item: item,
+                isSelected: viewModel.isSelected(item),
+                isRenaming: false,
+                clipboardManager: clipboardManager,
+                fileExplorerViewModel: viewModel,
+                isDimmed: showDimmed,
+                onSingleClick: { handleSingleClick(item) },
+                onDoubleClick: { handleDoubleClick(item) },
+                renamingFocusedID: $renamingFocusedID
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.18 : 0))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.folderAccent.opacity(springLoadedItemID == item.id ? 0.85 : 0), lineWidth: 1.5)
+                    )
+                    .allowsHitTesting(false)
+                    .animation(
+                        springLoadedItemID == item.id
+                            ? .easeInOut(duration: 0.38).repeatForever(autoreverses: true)
+                            : .easeOut(duration: 0.12),
+                        value: springLoadedItemID == item.id
+                    )
+            }
+            .overlay {
+                Color.clear.multiFileDrag(
+                    urls: viewModel.isSelected(item)
+                        ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
+                        : [item.path],
+                    enabled: true,
+                    dropDestination: item.type == .folder ? item.path : nil,
+                    onDropFiles: { sources, forceCopy in
+                        endSpringLoading(item)
+                        operationCoordinator.drop(sources, into: item.path, forceCopy: forceCopy)
+                    },
+                    onDragEntered: { beginSpringLoading(item) },
+                    onDragExited: { endSpringLoading(item) },
+                    onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
+                    onDoubleClick: { handleDoubleClick(item) },
+                    onColorTagDrop: { farbe in
+                        viewModel.applyColorTag(farbe, to: tagDropTargets(for: item))
+                    },
+                    onColorTagHover: { aktiv in
+                        if aktiv {
+                            tagDropTargetID = item.id
+                        } else if tagDropTargetID == item.id {
+                            tagDropTargetID = nil
+                        }
+                    }
+                )
+            }
+            .contextMenu {
+                FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
+            }
+            // Eine Farbe aus der Sidebar hierher fallen lassen markiert
+            // die Zeile. Der Rahmen zeigt vorher, welche Zeile trifft.
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(
+                        Color.folderAccent.opacity(tagDropTargetID == item.id ? 0.9 : 0),
+                        lineWidth: 2
+                    )
+                    .allowsHitTesting(false)
+            }
+    }
+
+    /// Worauf ein fallengelassener Tag wirkt: auf die ganze Auswahl, wenn die
+    /// getroffene Zeile dazugehört, sonst nur auf diese eine. Wie in Finder.
+    private func tagDropTargets(for item: FileSystemItem) -> [FileSystemItem] {
+        guard viewModel.selectedItems.contains(item.id) else { return [item] }
+        return viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
     }
 
     private func dropFilesIntoCurrentFolder(_ providers: [NSItemProvider]) -> Bool {
@@ -182,37 +229,6 @@ struct FileListView: View {
         CommandLineLauncher.shared.open(at: path, settings: settingsManager.settings)
     }
 
-    private func openCustomTerminal(_ terminalURL: URL, at path: URL) {
-        // Use AppleScript for Terminal.app specifically
-        if terminalURL.path.contains("Terminal.app") {
-            let script = """
-                tell application "Terminal"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-        } else if terminalURL.path.contains("iTerm") {
-            let script = """
-                tell application "iTerm"
-                    activate
-                    do script "cd '\(path.path)'"
-                end tell
-                """
-            if let appleScript = NSAppleScript(source: script) {
-                var error: NSDictionary?
-                appleScript.executeAndReturnError(&error)
-            }
-        } else {
-            // For other terminals, try opening with the path
-            let config = NSWorkspace.OpenConfiguration()
-            NSWorkspace.shared.open([path], withApplicationAt: terminalURL, configuration: config)
-        }
-    }
-
     private func handleSingleClick(
         _ item: FileSystemItem,
         modifiers modifierFlags: NSEvent.ModifierFlags = NSEvent.modifierFlags
@@ -260,6 +276,7 @@ struct FileListRowWithRename: View {
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var thumbnailService = ThumbnailService.shared
     @State private var thumbnail: NSImage?
+    @State private var icon: NSImage?
 
     var body: some View {
         if isRenaming {
@@ -274,7 +291,7 @@ struct FileListRowWithRename: View {
                             .frame(width: 20, height: 20)
                             .clipShape(RoundedRectangle(cornerRadius: 2))
                     } else {
-                        iconService.swiftUIIcon(for: item, size: 20)
+                        Image(nsImage: icon ?? iconService.icon(for: item, size: 20))
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(width: 20, height: 20)
@@ -306,6 +323,12 @@ struct FileListRowWithRename: View {
             .cornerRadius(4)
             .transaction { $0.animation = nil }
             .task {
+                // Das echte Symbol kommt abseits des Hauptthreads nach — im
+                // Bildaufbau darf es nie geholt werden.
+                if let geladen = await iconService.loadIcon(for: item, size: 20) {
+                    icon = geladen
+                }
+
                 // Load thumbnail when entering rename mode
                 if thumbnailService.supportsThumbnail(for: item.path.path) {
                     thumbnail = await thumbnailService.getThumbnail(for: item.path.path, size: CGSize(width: 40, height: 40))
@@ -334,18 +357,21 @@ struct FileListRow: View {
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var thumbnailService = ThumbnailService.shared
     @State private var thumbnail: NSImage?
+    @State private var icon: NSImage?
 
     private var isCut: Bool {
         clipboardManager.clipboardAction == .cut &&
         clipboardManager.clipboardItems.contains(where: { $0.path == item.path })
     }
 
+    /// Kommt aus dem Einlesen des Ordners. Pro Kachel auf die Platte zu gehen
+    /// wuerde bei tausend Dateien tausend Zugriffe je Bildaufbau kosten.
     private var colorTag: ColorTag? {
-        sidebarManager.getColorTag(for: item.path)
+        item.colorTag.map { ColorTag(color: $0, name: $0.displayName) }
     }
 
     private var quickLookTransitionImage: NSImage {
-        thumbnail ?? iconService.icon(for: item, size: 20)
+        thumbnail ?? icon ?? iconService.icon(for: item, size: 20)
     }
 
     private var opacity: Double {
@@ -371,7 +397,7 @@ struct FileListRow: View {
                         .clipShape(RoundedRectangle(cornerRadius: 2))
                 } else {
                     // Show regular icon
-                    iconService.swiftUIIcon(for: item, size: 20)
+                    Image(nsImage: icon ?? iconService.icon(for: item, size: 20))
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 20, height: 20)
@@ -451,6 +477,12 @@ struct FileListRow: View {
         .opacity(opacity)
         .transaction { $0.animation = nil }
         .task {
+            // Das echte Symbol kommt abseits des Hauptthreads nach — im
+            // Bildaufbau darf es nie geholt werden.
+            if let geladen = await iconService.loadIcon(for: item, size: 20) {
+                icon = geladen
+            }
+
             // Load thumbnail for images and PDFs
             if thumbnailService.supportsThumbnail(for: item.path.path) {
                 thumbnail = await thumbnailService.getThumbnail(for: item.path.path, size: CGSize(width: 40, height: 40))

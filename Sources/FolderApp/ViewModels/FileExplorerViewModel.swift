@@ -29,6 +29,9 @@ class FileExplorerViewModel: ObservableObject {
     @Published var renamingItem: UUID? // Track which item is being renamed
     @Published var renameText: String = "" // Current text in rename field
     @Published var isProcessing = false // Background file operation in progress
+    /// Wie viele Spalten das Icon-Gitter gerade wirklich hat. Wird von der
+    /// Gitteransicht gemessen und gemeldet — Pfeil hoch/runter rechnet damit.
+    @Published var gridColumnsPerRow: Int = 1
 
     // Tag filter mode (Finder-like color tag view)
     @Published var tagFilterMode: ColorTag.TagColor? = nil
@@ -107,7 +110,7 @@ class FileExplorerViewModel: ObservableObject {
         let generation = loadGeneration
         let requestedPath = currentPath
         if showLoadingIndicator {
-            isLoading = true
+            scheduleLoadingIndicator()
         }
         errorMessage = nil
         requiresPermission = false
@@ -156,7 +159,7 @@ class FileExplorerViewModel: ObservableObject {
             if self.items != sortedContents {
                 self.items = sortedContents
             }
-            self.isLoading = false
+            self.hideLoadingIndicator()
             self.requiresPermission = false
 
             // Save as last opened folder
@@ -188,7 +191,7 @@ class FileExplorerViewModel: ObservableObject {
             self.errorMessage = "Failed to load directory: \(error.localizedDescription)"
             self.requiresPermission = Self.isPermissionDenied(error)
             self.items = []
-            self.isLoading = false
+            self.hideLoadingIndicator()
 
             // Stop watching on error
             fileWatcher.stopWatching()
@@ -296,11 +299,35 @@ class FileExplorerViewModel: ObservableObject {
         canGoForward = navigationHistory.canGoForward
     }
 
+    /// Die Ladeanzeige erscheint erst, wenn das Lesen wirklich dauert.
+    ///
+    /// Ein Ordner ist meist in unter einer Millisekunde gelesen. Wurde die
+    /// Anzeige sofort gesetzt, zeichnete SwiftUI trotzdem mindestens ein Bild
+    /// „leer plus Spinner“, bevor der Inhalt kam — genau das las sich als
+    /// Verzoegerung, obwohl nichts langsam war. Ein Hinweis, der nach zwanzig
+    /// Millisekunden wieder verschwindet, ist kein Hinweis, sondern Flackern.
+    private var loadingIndicatorTask: Task<Void, Never>?
+
+    private func scheduleLoadingIndicator() {
+        loadingIndicatorTask?.cancel()
+        loadingIndicatorTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            guard !Task.isCancelled else { return }
+            self?.isLoading = true
+        }
+    }
+
+    private func hideLoadingIndicator() {
+        loadingIndicatorTask?.cancel()
+        loadingIndicatorTask = nil
+        isLoading = false
+    }
+
     /// Makes path changes visually atomic: the old directory is removed and
     /// any in-flight load invalidated before SwiftUI can render the new path.
     private func prepareForNavigation(to url: URL) {
         loadGeneration += 1
-        isLoading = true
+        scheduleLoadingIndicator()
         errorMessage = nil
         requiresPermission = false
         items = []
@@ -483,30 +510,36 @@ class FileExplorerViewModel: ObservableObject {
         }
     }
 
-    func selectItemBelow(columnsPerRow: Int) {
-        guard !items.isEmpty else { return }
+    // Pfeil hoch/runter bewegt sich im Gitter senkrecht: eine Zeile, gleiche
+    // Spalte. Gibt es die Zeile nicht, passiert nichts.
+    //
+    // Vorher wurde auf den ersten beziehungsweise letzten Eintrag geklemmt.
+    // Das sah aus wie ein schräger Sprung, weil dabei auch die Spalte wechselte:
+    // Runter in der letzten Zeile landete auf der letzten Datei, hoch in der
+    // ersten Zeile in der linken Ecke. Ans Ende zu springen ist keine
+    // Abwärtsbewegung.
 
-        if let currentID = selectedItemID ?? lastSelectedItem,
-           let currentIndex = items.firstIndex(where: { $0.id == currentID }) {
-            let nextIndex = min(currentIndex + columnsPerRow, items.count - 1)
-            selectOnly(items[nextIndex])
-        } else {
-            // No selection, select first item
-            selectOnly(items[0])
-        }
+    func selectItemBelow(columnsPerRow: Int) {
+        moveSelectionVertically(by: max(columnsPerRow, 1))
     }
 
     func selectItemAbove(columnsPerRow: Int) {
+        moveSelectionVertically(by: -max(columnsPerRow, 1))
+    }
+
+    private func moveSelectionVertically(by offset: Int) {
         guard !items.isEmpty else { return }
 
-        if let currentID = selectedItemID ?? lastSelectedItem,
-           let currentIndex = items.firstIndex(where: { $0.id == currentID }) {
-            let prevIndex = max(currentIndex - columnsPerRow, 0)
-            selectOnly(items[prevIndex])
-        } else {
-            // No selection, select first item
+        guard let currentID = selectedItemID ?? lastSelectedItem,
+              let currentIndex = items.firstIndex(where: { $0.id == currentID }) else {
+            // Ohne Auswahl fängt die Tastatur beim ersten Eintrag an.
             selectOnly(items[0])
+            return
         }
+
+        let target = currentIndex + offset
+        guard items.indices.contains(target) else { return }
+        selectOnly(items[target])
     }
 
     func openSelectedItem() {
@@ -582,41 +615,52 @@ class FileExplorerViewModel: ObservableObject {
         selectedItems.removeAll()
     }
 
+    // MARK: - Farb-Tags
+
+    /// Setzt eine Farbe auf die übergebenen Einträge. `nil` nimmt sie herunter.
+    ///
+    /// Die eine Stelle, an der ein Tag gesetzt wird — das Kontextmenü und das
+    /// Fallenlassen einer Farbe aus der Sidebar gehen beide hier durch. Zwei
+    /// Wege, die dasselbe tun, laufen sonst früher oder später auseinander.
+    func applyColorTag(_ color: ColorTag.TagColor?, to items: [FileSystemItem]) {
+        guard !items.isEmpty else { return }
+
+        let tag = color.map { ColorTag(color: $0, name: $0.displayName) }
+        for item in items {
+            SidebarManager.shared.setColorTag(for: item.path, tag: tag)
+        }
+
+        // Die Kacheln tragen die Farbe aus dem letzten Einlesen. Ohne das
+        // Nachladen bliebe der Punkt bis zur nächsten Navigation stehen.
+        refresh()
+
+        // Steht die Tag-Ansicht offen, muss sie neu aufgebaut werden: eine
+        // Datei, der man die Farbe genommen hat, gehört nicht mehr hinein.
+        if let aktiveFarbe = tagFilterMode {
+            showFilesWithTag(aktiveFarbe)
+        }
+    }
+
     // MARK: - Tag Filter Mode
 
     func showFilesWithTag(_ color: ColorTag.TagColor) {
-        let sidebarManager = SidebarManager.shared
         tagFilterMode = color
 
-        // Get all URLs with this color from sidebarManager.colorTags
-        let taggedURLs = sidebarManager.colorTags
-            .filter { $0.value.color == color }
-            .map { $0.key }
+        // Welche Dateien den Tag tragen, weiss Spotlight — die Tags liegen auf
+        // den Dateien, nicht in einer Liste der App.
+        let taggedURLs = TagIndex.shared.urls(taggedWith: color)
 
-        // Create FileSystemItems for those URLs
-        tagFilteredItems = taggedURLs.compactMap { url in
-            // Check if file/folder still exists
-            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-
-            do {
-                let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey, .fileSizeKey, .isSymbolicLinkKey])
-                let isDirectory = resourceValues.isDirectory ?? false
-                let modifiedAt = resourceValues.contentModificationDate ?? Date()
-                let size = Int64(resourceValues.fileSize ?? 0)
-                let isSymlink = resourceValues.isSymbolicLink ?? false
-
-                return FileSystemItem(
-                    path: url,
-                    name: url.lastPathComponent,
-                    type: isDirectory ? .folder : .file,
-                    size: size,
-                    modifiedAt: modifiedAt,
-                    isSymlink: isSymlink
-                )
-            } catch {
-                return nil
-            }
-        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // Über denselben Weg wie jeder Ordnerinhalt. Vorher wurden die Einträge
+        // hier von Hand zusammengesetzt und der Farb-Tag dabei ausgelassen — in
+        // der Tag-Ansicht trug damit keine Datei eine Farbe, obwohl genau die
+        // Farbe sie in diese Ansicht gebracht hat. Sichtbar wurde es daran, dass
+        // „Remove Tag" ausgegraut blieb: die App hielt die Datei für unmarkiert.
+        //
+        // Ein zweiter Weg, eine URL in einen Eintrag zu verwandeln, wird immer
+        // wieder ein Feld vergessen. Deshalb gibt es nur noch den einen.
+        tagFilteredItems = taggedURLs
+            .compactMap { try? FileSystemItem(from: $0) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
         // Clear selection
         selectedItems.removeAll()

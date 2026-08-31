@@ -18,6 +18,15 @@ class SearchViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var searchErrors: [String] = []
 
+    /// Die Suche ist geparkt: Der Nutzer hat einen Treffer geöffnet und schaut
+    /// gerade in einen Ordner. Begriff und Trefferliste bleiben stehen, bis er
+    /// zurückkommt.
+    @Published private(set) var isParked = false
+
+    /// Der Ordner, in dem gesucht wurde. Kehrt der Nutzer hierher zurück, ist
+    /// die Trefferliste wieder da.
+    private(set) var searchRoot: URL?
+
     // Selection state for search results
     @Published var selectedItems: Set<UUID> = []
     var lastSelectedItem: UUID?
@@ -31,6 +40,9 @@ class SearchViewModel: ObservableObject {
     // MARK: - Search
 
     func search(in folder: URL, depth: Int = 2) {
+        searchRoot = folder
+        isParked = false
+
         // Cancel previous search
         searchTask?.cancel()
         searchGeneration += 1
@@ -146,6 +158,38 @@ class SearchViewModel: ObservableObject {
         searchErrors = []
         searchTask?.cancel()
         searchGeneration += 1
+        isParked = false
+        searchRoot = nil
+    }
+
+    // MARK: - Parken
+
+    /// Legt die Suche beiseite, statt sie wegzuwerfen.
+    ///
+    /// Wer aus der Trefferliste einen Ordner öffnet, will ihn ansehen — nicht
+    /// die Suche verlieren. Vorher wurde an dieser Stelle alles gelöscht, und
+    /// selbst Zurück brachte die Treffer nicht wieder: man musste den Begriff
+    /// neu tippen. Genau dafür sucht man aber.
+    func park() {
+        guard isSearchActive, !searchResults.isEmpty else { return }
+        isSearchActive = false
+        isParked = true
+        selectedItems = []
+        lastSelectedItem = nil
+    }
+
+    /// Holt die geparkte Suche zurück, sobald der Nutzer wieder in dem Ordner
+    /// steht, in dem er gesucht hat.
+    @discardableResult
+    func resumeIfParked(at path: URL) -> Bool {
+        guard isParked,
+              let searchRoot,
+              searchRoot.standardizedFileURL == path.standardizedFileURL
+        else { return false }
+
+        isParked = false
+        isSearchActive = true
+        return true
     }
 
     func activateSearch() {
@@ -165,6 +209,20 @@ class SearchViewModel: ObservableObject {
             selectedItems.insert(item.id)
         }
         lastSelectedItem = item.id
+    }
+
+    /// Liest die Farb-Tags der Treffer neu ein.
+    ///
+    /// Die Treffer tragen ihren Tag aus dem Moment der Suche. Wer aus der
+    /// Trefferliste heraus einen Tag setzt, soll den Punkt sofort sehen und
+    /// nicht erst nach einer neuen Suche.
+    func refreshTagsIfNeeded() {
+        guard !searchResults.isEmpty else { return }
+        searchResults = searchResults.map { treffer in
+            var aktualisiert = treffer
+            aktualisiert.colorTag = FinderTagService.colorTag(for: treffer.path)
+            return aktualisiert
+        }
     }
 
     func clearSelection() {
@@ -228,30 +286,32 @@ class SearchViewModel: ObservableObject {
         }
     }
 
+    // Senkrecht heisst senkrecht: eine Zeile, gleiche Spalte. Fehlt die Zeile,
+    // bleibt die Auswahl stehen, statt in die Ecke zu springen — siehe die
+    // gleichlautende Stelle in FileExplorerViewModel.
+
     func selectItemAbove(columnsPerRow: Int) {
-        guard !searchResults.isEmpty else { return }
-        if let first = selectedItems.first,
-           let idx = searchResults.firstIndex(where: { $0.id == first }) {
-            let prev = max(idx - columnsPerRow, 0)
-            selectedItems = [searchResults[prev].id]
-            lastSelectedItem = searchResults[prev].id
-        } else {
-            selectedItems = [searchResults[0].id]
-            lastSelectedItem = searchResults[0].id
-        }
+        moveSelectionVertically(by: -max(columnsPerRow, 1))
     }
 
     func selectItemBelow(columnsPerRow: Int) {
+        moveSelectionVertically(by: max(columnsPerRow, 1))
+    }
+
+    private func moveSelectionVertically(by offset: Int) {
         guard !searchResults.isEmpty else { return }
-        if let first = selectedItems.first,
-           let idx = searchResults.firstIndex(where: { $0.id == first }) {
-            let next = min(idx + columnsPerRow, searchResults.count - 1)
-            selectedItems = [searchResults[next].id]
-            lastSelectedItem = searchResults[next].id
-        } else {
+
+        guard let first = selectedItems.first,
+              let idx = searchResults.firstIndex(where: { $0.id == first }) else {
             selectedItems = [searchResults[0].id]
             lastSelectedItem = searchResults[0].id
+            return
         }
+
+        let target = idx + offset
+        guard searchResults.indices.contains(target) else { return }
+        selectedItems = [searchResults[target].id]
+        lastSelectedItem = searchResults[target].id
     }
 
     func selectAll() {
