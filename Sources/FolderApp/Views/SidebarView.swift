@@ -443,6 +443,10 @@ struct SidebarFavoriteItem: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // Zwei Ordner können gleich heissen — `~/Applications` und
+        // `/Applications` etwa. Ohne den Pfad sieht man dem Eintrag nicht an,
+        // welcher der beiden gemeint ist.
+        .help(favorite.path.path)
         .contextMenu {
             // Move Up (disabled if first item)
             Button("Move Up") {

@@ -19,7 +19,12 @@ private struct BreadcrumbContentWidthKey: PreferenceKey {
 struct NavigationBar: View {
     @ObservedObject var viewModel: FileExplorerViewModel
     @ObservedObject var searchViewModel: SearchViewModel
-    @Binding var isSidebarCollapsed: Bool
+    /// Ob die Sidebar tatsächlich zu ist. Das schmale Fenster klappt sie auch
+    /// ohne Zutun des Nutzers zu — die Leiste muss dann ebenso einrücken.
+    var isSidebarActuallyCollapsed: Bool = false
+    /// Schaltet die Sidebar um. Bewusst ein Befehl und kein Zustand — welcher
+    /// Zustand gilt, weiss nur die Aufteilung selbst.
+    var toggleSidebar: () -> Void = {}
     @EnvironmentObject var settingsManager: SettingsManager
     @State private var editingPath: String = ""
     @State private var isEditingPath = false
@@ -37,20 +42,20 @@ struct NavigationBar: View {
     /// Ob die Sidebar gerade wirklich zu sehen ist — abgeschaltet und
     /// eingeklappt sind zwei Wege zum selben Bild.
     private var isSidebarVisible: Bool {
-        settingsManager.settings.showSidebar && !isSidebarCollapsed
+        settingsManager.settings.showSidebar && !isSidebarActuallyCollapsed
     }
 
     var body: some View {
         HStack(spacing: 6) {
             // Sidebar toggle button
-            Button(action: { isSidebarCollapsed.toggle() }) {
+            Button(action: toggleSidebar) {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 16, weight: .medium))
                     .foregroundColor(.primary)
             }
             .buttonStyle(FolderChromeButtonStyle())
-            .help(isSidebarCollapsed ? "Show sidebar" : "Hide sidebar")
-            .accessibilityLabel(isSidebarCollapsed ? "Show sidebar" : "Hide sidebar")
+            .help(isSidebarActuallyCollapsed ? "Show sidebar" : "Hide sidebar")
+            .accessibilityLabel(isSidebarActuallyCollapsed ? "Show sidebar" : "Hide sidebar")
 
             // Der Umschalter gehört zur Sidebar, die Pfeile zur Navigation.
             // Der Strich trennt die beiden — aber nur, solange es die Sidebar
@@ -307,9 +312,17 @@ struct NavigationBar: View {
                 }
             }
             .onChange(of: isSearchFieldFocused) { isFocused in
-                // A normal AppKit focus change (for example via keyboard
-                // navigation) should leave search just like a click outside it.
-                if searchViewModel.isSearchActive && !isFocused {
+                // Den Fokus zu verlieren ist kein Schliessen der Suche.
+                //
+                // Wer in die Trefferliste klickt, will einen Treffer ansehen —
+                // nicht seine Eingabe verlieren. Vorher wurde hier alles
+                // gelöscht, und man stand wieder im Ordner, in dem man getippt
+                // hatte. Geschlossen wird nur mit Escape oder über das ✕.
+                //
+                // Bei leerem Feld gibt es nichts zu bewahren; dann darf ein
+                // Klick daneben die Suche wie gewohnt zumachen.
+                if searchViewModel.isSearchActive && !isFocused,
+                   searchViewModel.searchQuery.isEmpty {
                     searchViewModel.deactivateSearch()
                 }
             }
@@ -490,7 +503,10 @@ struct NavigationBar: View {
                 isPathFieldFocused = false
             }
 
-            if searchViewModel.isSearchActive && clickedOutsideActiveField {
+            // Nur eine leere Suche schliesst sich beim Klick daneben — eine
+            // getippte bleibt stehen. Siehe die Begründung weiter oben.
+            if searchViewModel.isSearchActive && clickedOutsideActiveField,
+               searchViewModel.searchQuery.isEmpty {
                 searchViewModel.deactivateSearch()
                 isSearchFieldFocused = false
             }

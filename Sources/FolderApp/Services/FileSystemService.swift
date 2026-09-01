@@ -30,7 +30,9 @@ final class FileSystemService: @unchecked Sendable {
                 .isHiddenKey,
                 // Vorgeladen, damit der Farb-Tag jeder Datei aus demselben
                 // Durchgang kommt statt aus einem zweiten Zugriff pro Kachel.
-                .labelNumberKey
+                .labelNumberKey,
+                // Pakete werden beim Suchen nicht betreten — siehe FileSystemItem.
+                .isPackageKey
             ],
             options: []
         )

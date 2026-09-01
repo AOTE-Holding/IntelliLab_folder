@@ -19,7 +19,26 @@ jobs:
       - name: Set version from tag
         run: echo "${GITHUB_REF_NAME#v}" > VERSION
 
+      # Ohne hinterlegte Schlüssel ist kein signierter Build möglich. Das ist
+      # kein Fehler, sondern ein Zustand: Dann wird unsigniert gebaut und
+      # veröffentlicht, statt den Lauf abzubrechen. Vorher scheiterte jeder
+      # Release nach zwölf Sekunden am Import eines Zertifikats, das es nicht
+      # gibt — und die Veröffentlichung musste von Hand nachgeholt werden.
+      - name: Check signing secrets
+        id: check
+        env:
+          CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_APPLICATION_P12 }}
+        run: |
+          if [ -n "$CERTIFICATE_P12" ]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets present — building a signed and notarized app."
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "No signing secrets — building an unsigned app."
+          fi
+
       - name: Import Developer ID certificate
+        if: steps.check.outputs.signed == 'true'
         env:
           CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_APPLICATION_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_PASSWORD }}
@@ -38,6 +57,7 @@ jobs:
           swift test -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
 
       - name: Build signed app
+        if: steps.check.outputs.signed == 'true'
         env:
           BUILD_CONFIGURATION: release
           BUNDLE_IDENTIFIER: ${{ secrets.BUNDLE_IDENTIFIER }}
@@ -47,7 +67,12 @@ jobs:
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
         run: ./build.sh
 
+      - name: Build unsigned app
+        if: steps.check.outputs.signed != 'true'
+        run: ./build.sh
+
       - name: Notarize and staple
+        if: steps.check.outputs.signed == 'true'
         env:
           APPLE_ID: ${{ secrets.NOTARIZATION_APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.NOTARIZATION_APP_PASSWORD }}
@@ -58,22 +83,46 @@ jobs:
           xcrun stapler staple Folder.app
           spctl --assess --type execute --verbose=4 Folder.app
 
-      - name: Package Sparkle archive
-        run: ditto -c -k --keepParent Folder.app Folder.app.zip
+      - name: Package archive
+        run: |
+          mkdir -p releases
+          ditto -c -k --keepParent --sequesterRsrc Folder.app releases/Folder.app.zip
 
+      # Der Appcast ist Sparkles Update-Verzeichnis. Er trägt eine Signatur und
+      # ist ohne privaten Schlüssel wertlos — ein unsignierter Eintrag würde von
+      # Sparkle ohnehin abgewiesen.
       - name: Sign archive and generate appcast
+        if: steps.check.outputs.signed == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
-          mkdir releases
-          mv Folder.app.zip releases/
           GENERATE_APPCAST=$(find .build -type f -name generate_appcast -print -quit)
           printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" --ed-key-file - releases
+
+      - name: Compose release notes
+        id: notes
+        run: |
+          if [ "${{ steps.check.outputs.signed }}" = "true" ]; then
+            echo "body=" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo 'body<<NOTE'
+              echo '## Install'
+              echo
+              echo '1. Download `Folder.app.zip` below.'
+              echo '2. Unzip it and drag `Folder.app` to `/Applications`.'
+              echo '3. Open Folder.'
+              echo
+              echo '> This package is built without an Apple signature, because the'
+              echo '> signing secrets are not configured for this repository. macOS'
+              echo '> may ask for confirmation the first time it is opened.'
+              echo 'NOTE'
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            releases/Folder.app.zip
-            releases/appcast.xml
+          files: releases/*
+          body: ${{ steps.notes.outputs.body }}
           generate_release_notes: true

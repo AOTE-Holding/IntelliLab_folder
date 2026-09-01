@@ -19,13 +19,11 @@ extension Color {
     static let folderSubtleFill = Color.dynamic(light: "#EEF3F5", dark: "#202A34")
 
     // Adaptive colors for light/dark mode
-    static var folderBase: Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .vibrantDark]) != nil
-                ? NSColor(red: 20/255, green: 27/255, blue: 35/255, alpha: 1)  // Dark mode
-                : NSColor(red: 1, green: 1, blue: 1, alpha: 1)                  // Light mode (white)
-        })
-    }
+    //
+    // Der Wert steht in der NSColor-Fassung weiter unten. AppKit braucht ihn
+    // ebenfalls — zwei getrennte Definitionen wären zwei Wahrheiten, die
+    // irgendwann auseinanderlaufen.
+    static var folderBase: Color { Color(nsColor: .folderBase) }
 
     static var folderSidebar: Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -85,6 +83,13 @@ struct FolderChromeButtonStyle: ButtonStyle {
 }
 
 extension NSColor {
+    /// Der Grund des Inhaltsbereichs.
+    static let folderBase = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .vibrantDark]) != nil
+            ? NSColor(red: 20/255, green: 27/255, blue: 35/255, alpha: 1)
+            : NSColor(red: 1, green: 1, blue: 1, alpha: 1)
+    }
+
     static let folderAccent = NSColor(red: 0x00 / 255.0, green: 0xA9 / 255.0, blue: 0x8F / 255.0, alpha: 1.0)
 
     /// Der Fenstergrund. Folgt dem eingestellten Erscheinungsbild — als fester

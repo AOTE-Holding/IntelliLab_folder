@@ -173,7 +173,10 @@ struct FolderBrowserView: View {
     @StateObject private var volumeManager = VolumeManager.shared
     @State private var keyEventMonitor: Any?
     @State private var showingSearchErrors = false
-    @State private var sidebarIsManuallyCollapsed = false
+    /// Ob die Sidebar tatsächlich zu ist — auch wenn nur das schmale Fenster
+    /// sie zugeklappt hat. Danach richten sich Leiste, Anfasser und Trennstrich.
+    @State private var sidebarIsCollapsed = false
+    @State private var sidebarToggleRequest = 0
     @State private var appliedDefaultViewMode: AppSettings.DisplayMode?
     @State private var appliedIconSize: Int?
     @State private var appliedHiddenFiles: Bool?
@@ -198,7 +201,8 @@ struct FolderBrowserView: View {
                         fileExplorerViewModel: viewModel
                     ),
                     detail: mainContentArea,
-                    isCollapsed: $sidebarIsManuallyCollapsed
+                    isEffectivelyCollapsed: $sidebarIsCollapsed,
+                    toggleRequest: sidebarToggleRequest
                 )
             } else {
                 mainContentArea
@@ -209,9 +213,9 @@ struct FolderBrowserView: View {
         // Inhalt: der Trennbereich hat eingeklappt keine Breite mehr, also
         // bliebe darunter kein Platz, an dem er sichtbar wäre.
         .overlay(alignment: .leading) {
-            if settingsManager.settings.showSidebar && sidebarIsManuallyCollapsed {
+            if settingsManager.settings.showSidebar && sidebarIsCollapsed {
                 SidebarRevealGrip {
-                    sidebarIsManuallyCollapsed = false
+                    sidebarToggleRequest += 1
                 }
             }
         }
@@ -301,7 +305,8 @@ struct FolderBrowserView: View {
             NavigationBar(
                 viewModel: viewModel,
                 searchViewModel: searchViewModel,
-                isSidebarCollapsed: $sidebarIsManuallyCollapsed
+                isSidebarActuallyCollapsed: sidebarIsCollapsed,
+                toggleSidebar: { sidebarToggleRequest += 1 }
             )
                 .padding(.horizontal, 12)
                 .padding(.top, 6)
@@ -828,12 +833,27 @@ private enum SidebarSplitMetrics {
 
 /// AppKit owns divider tracking, so a wide SwiftUI grid is not rebuilt through
 /// a SwiftUI drag gesture for every mouse movement.
-private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable {
+struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable {
     let sidebar: Sidebar
     let detail: Detail
-    @Binding var isCollapsed: Bool
+    /// Ob die Sidebar gerade **tatsächlich** zu ist — auch wenn nur das schmale
+    /// Fenster sie zugeklappt hat.
+    ///
+    /// Ohne diese zweite Bindung wusste die Oberfläche von der automatischen
+    /// Variante nichts: Die Leiste rückte nicht von den Fensterknöpfen weg, der
+    /// Anfasser blieb unsichtbar, und Aufziehen ging weder per Knopf noch am Rand.
+    @Binding var isEffectivelyCollapsed: Bool
+    /// Wird hochgezählt, wenn der Nutzer die Sidebar umschalten will.
+    ///
+    /// Ein Zustand allein genügt dafür nicht: Hat das schmale Fenster zugeklappt,
+    /// steht die Nutzerwahl bereits auf „offen“, und ein erneutes Setzen auf
+    /// „offen“ ändert nichts — der Knopf bliebe wirkungslos. Ein Zähler ist
+    /// dagegen jedes Mal ein neues Ereignis.
+    let toggleRequest: Int
 
-    func makeCoordinator() -> Coordinator { Coordinator(isCollapsed: $isCollapsed) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isEffectivelyCollapsed: $isEffectivelyCollapsed)
+    }
 
     func makeNSView(context: Context) -> FolderNativeSplitView {
         let splitView = FolderNativeSplitView()
@@ -870,7 +890,8 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
     func updateNSView(_ splitView: FolderNativeSplitView, context: Context) {
         // State changes from the toolbar must reach AppKit even if SwiftUI has
         // replaced one of the generic hosting-view wrappers during an update.
-        context.coordinator.applyManualCollapse(isCollapsed, to: splitView)
+        context.coordinator.publishCollapsedState()
+        context.coordinator.handleToggleRequest(toggleRequest, in: splitView)
         guard splitView.subviews.count == 2,
               let sidebarHost = splitView.subviews[0] as? NSHostingView<Sidebar>,
               let detailHost = splitView.subviews[1] as? NSHostingView<Detail> else { return }
@@ -880,39 +901,96 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
 
     @MainActor
     final class Coordinator: NSObject, NSSplitViewDelegate {
-        private var isCollapsed: Binding<Bool>
+        private var isEffectivelyCollapsed: Binding<Bool>
         private var pendingSave: DispatchWorkItem?
         private var sidebarIsCollapsedForWindow = false
         private var sidebarIsManuallyCollapsed = false
         private var lastExpandedWidth = SidebarSplitMetrics.defaultWidth
 
-        init(isCollapsed: Binding<Bool>) {
-            self.isCollapsed = isCollapsed
+        /// Der Nutzer hat die Sidebar im schmalen Fenster ausdrücklich geholt.
+        /// Dann bleibt sie, bis er sie selbst wieder zuklappt — sonst würde die
+        /// automatische Regel sie ihm sofort wieder wegnehmen.
+        private var keepSidebarInNarrowWindow = false
+
+        init(isEffectivelyCollapsed: Binding<Bool>) {
+            self.isEffectivelyCollapsed = isEffectivelyCollapsed
+        }
+
+        private var lastToggleRequest = 0
+
+        /// Ein Klick auf den Umschalter — als **Anforderung**, nicht als Zustand.
+        ///
+        /// Der Zustand hat hier dreimal versagt: Setzt man ihn auf einen Wert,
+        /// den er schon hat, passiert nichts. Nach einem Aufziehen stand die
+        /// Wahl noch auf „zugeklappt“, das schmale Fenster klappte ohne Zutun
+        /// zu — in beiden Fällen war der Knopf danach wirkungslos. Ein Zähler
+        /// ist dagegen jedes Mal ein neues Ereignis, und die Wahrheit über
+        /// „offen oder zu“ liegt nur noch hier.
+        func handleToggleRequest(_ request: Int, in splitView: NSSplitView) {
+            guard request != lastToggleRequest else { return }
+            lastToggleRequest = request
+            // Erst im nächsten Durchlauf: Der Aufruf kommt aus `updateNSView`,
+            // und das Umschalten schreibt in den SwiftUI-Zustand.
+            DispatchQueue.main.async { [weak splitView] in
+                guard let splitView else { return }
+                self.toggleSidebar(in: splitView)
+            }
+        }
+
+        func toggleSidebar(in splitView: NSSplitView) {
+            if isActuallyCollapsed {
+                _ = revealManuallyCollapsedSidebar(in: splitView)
+            } else {
+                collapseSidebar(in: splitView)
+            }
+        }
+
+        private func collapseSidebar(in splitView: NSSplitView) {
+            if let sidebar = splitView.subviews.first, sidebar.frame.width > 0 {
+                lastExpandedWidth = sidebar.frame.width
+            }
+            sidebarIsManuallyCollapsed = true
+            keepSidebarInNarrowWindow = false
+            splitView.setPosition(0, ofDividerAt: 0)
+            publishCollapsedState()
+        }
+
+        /// Meldet den tatsächlich sichtbaren Zustand nach oben.
+        ///
+        /// Bewusst erst im nächsten Durchlauf: Ein Teil der Aufrufe kommt aus
+        /// `updateNSView`, also mitten aus dem Aufbau der Ansicht. Wer dort in
+        /// den SwiftUI-Zustand schreibt, dessen Änderung wird verworfen.
+        ///
+        /// Die Meldung geht nur in eine Richtung: von hier zur Oberfläche.
+        /// Zurück kommen ausschliesslich Anforderungen.
+        func publishCollapsedState() {
+            let neuerZustand = isActuallyCollapsed
+            guard isEffectivelyCollapsed.wrappedValue != neuerZustand else { return }
+            let bindung = isEffectivelyCollapsed
+            DispatchQueue.main.async {
+                guard bindung.wrappedValue != neuerZustand else { return }
+                bindung.wrappedValue = neuerZustand
+            }
         }
 
         private var isActuallyCollapsed: Bool {
             sidebarIsCollapsedForWindow || sidebarIsManuallyCollapsed
         }
 
-        func applyManualCollapse(_ shouldCollapse: Bool, to splitView: NSSplitView) {
-            guard sidebarIsManuallyCollapsed != shouldCollapse,
-                  let sidebar = splitView.subviews.first else { return }
-            sidebarIsManuallyCollapsed = shouldCollapse
-            if shouldCollapse {
-                if sidebar.frame.width > 0 { lastExpandedWidth = sidebar.frame.width }
-                splitView.setPosition(0, ofDividerAt: 0)
-            } else if !sidebarIsCollapsedForWindow {
-                splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
-            }
-        }
-
         /// The collapsed edge remains draggable. Revealing restores the last
         /// usable sidebar width before the native split view tracks the drag.
         func revealManuallyCollapsedSidebar(in splitView: NSSplitView) -> Bool {
-            guard sidebarIsManuallyCollapsed, !sidebarIsCollapsedForWindow else { return false }
+            guard isActuallyCollapsed else { return false }
+
+            // Beide Gründe aufheben. Vorher zählte nur der vom Nutzer gewählte —
+            // im schmalen Fenster liess sich die Sidebar deshalb gar nicht holen.
             sidebarIsManuallyCollapsed = false
-            isCollapsed.wrappedValue = false
+            if sidebarIsCollapsedForWindow {
+                sidebarIsCollapsedForWindow = false
+                keepSidebarInNarrowWindow = true
+            }
             splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
+            publishCollapsedState()
             return true
         }
 
@@ -979,10 +1057,11 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
                   let sidebar = splitView.subviews.first else { return }
 
             let windowIsNarrow = splitView.bounds.width <= SidebarSplitMetrics.collapseWindowWidth
-            if windowIsNarrow, !sidebarIsCollapsedForWindow {
+            if windowIsNarrow, !sidebarIsCollapsedForWindow, !keepSidebarInNarrowWindow {
                 lastExpandedWidth = sidebar.frame.width
                 sidebarIsCollapsedForWindow = true
                 splitView.setPosition(0, ofDividerAt: 0)
+                publishCollapsedState()
                 return
             }
             // A native divider gesture (for example a double-click on the
@@ -992,7 +1071,8 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
                sidebar.frame.width < 1,
                !sidebarIsManuallyCollapsed {
                 sidebarIsManuallyCollapsed = true
-                isCollapsed.wrappedValue = true
+                    keepSidebarInNarrowWindow = false
+                publishCollapsedState()
                 return
             }
             if !windowIsNarrow,
@@ -1002,6 +1082,7 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
                 if !sidebarIsManuallyCollapsed {
                     splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
                 }
+                publishCollapsedState()
                 return
             }
             guard !isActuallyCollapsed else { return }
@@ -1017,20 +1098,20 @@ private struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepres
     }
 }
 
-private final class FolderNativeSplitView: NSSplitView {
+final class FolderNativeSplitView: NSSplitView {
     var revealCollapsedSidebar: ((FolderNativeSplitView) -> Bool)?
 
     private var sidebarIsCollapsed: Bool { (subviews.first?.frame.width ?? 0) < 1 }
 
-    /// Ist die Sidebar zu, nimmt der Trennbereich keine Breite ein.
+    /// **Konstant.** Eine bewegliche Breite wäre die naheliegende Idee — null,
+    /// solange die Sidebar zu ist — und genau das ging schief: Beim Aufklappen
+    /// per Knopf stand sie noch auf null, das erste Ziehen fragte sie neu ab,
+    /// und die acht Punkte erschienen als Lücke, die vorher nicht da war.
     ///
-    /// Sonst bliebe am linken Fensterrand ein Streifen über die volle Höhe
-    /// stehen — mit Trennlinie und Griff darin, obwohl links davon nichts mehr
-    /// ist. Aufziehen geht weiterhin: den Randbereich fängt `mouseDown` selbst
-    /// ab, und der Umschalter in der Leiste tut es ohnehin.
-    override var dividerThickness: CGFloat {
-        sidebarIsCollapsed ? 0 : SidebarSplitMetrics.dividerWidth
-    }
+    /// Unsichtbar wird der Bereich stattdessen über das Zeichnen: bei zugeklappter
+    /// Sidebar bekommt er den Grund des Inhalts und ist von dessen Rand nicht zu
+    /// unterscheiden. Die Geometrie bleibt dabei in jedem Zustand dieselbe.
+    override var dividerThickness: CGFloat { SidebarSplitMetrics.dividerWidth }
 
     override func mouseDown(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
@@ -1094,6 +1175,16 @@ private final class FolderNativeSplitView: NSSplitView {
     /// Deshalb wird die Fläche zuerst gefüllt. Was darunter lag, ist damit weg,
     /// und es bleibt genau eine Trennlinie — die, die wir selbst setzen.
     override func drawDivider(in rect: NSRect) {
+        // Zugeklappt: den Grund des Inhalts nehmen und sonst nichts. Der Bereich
+        // ist dann von einem gewöhnlichen Rand nicht zu unterscheiden — kein
+        // Streifen, keine Linie, kein Griff. Der Anfasser zum Aufziehen liegt
+        // als eigene Fläche darüber.
+        guard !sidebarIsCollapsed else {
+            NSColor.folderBase.setFill()
+            rect.fill()
+            return
+        }
+
         NSColor.folderSidebar.setFill()
         rect.fill()
 

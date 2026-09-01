@@ -34,7 +34,11 @@ class SearchViewModel: ObservableObject {
     private var searchTask: Task<Void, Never>?
     private let fileSystemService = FileSystemService.shared
 
-    private let debounceDelay: TimeInterval = 0.15  // 150ms
+    /// Wartezeit, bevor getippte Zeichen eine Suche auslösen.
+    ///
+    /// Kurz genug, dass es nicht als Verzögerung auffällt, lang genug, dass
+    /// schnelles Tippen nicht jede Zwischenstufe durchsucht.
+    private let debounceDelay: TimeInterval = 0.08
     private var searchGeneration = 0
 
     // MARK: - Search
@@ -73,25 +77,44 @@ class SearchViewModel: ObservableObject {
         }
     }
 
+    /// Sucht in Stufen und zeigt jede Stufe sofort an.
+    ///
+    /// Der aktuelle Ordner allein ist in etwa zwei Millisekunden durchsucht, die
+    /// zweite Ebene braucht rund fünfzig, die dritte über hundert — gemessen im
+    /// Benutzerordner. Wer auf das Gesamtergebnis wartet, sieht deshalb erst nach
+    /// einer spürbaren Pause etwas, obwohl die naheliegenden Treffer längst
+    /// feststehen.
+    ///
+    /// Jede Stufe umfasst die vorige, die Liste wächst also nur — nichts
+    /// verschwindet wieder, und die Reihenfolge bleibt.
     private func performSearch(in folder: URL, query: String, depth: Int, generation: Int) async {
         let access = PermissionCenter.shared.beginAccess(to: folder)
         let readableFolder = access?.url ?? folder
         let service = fileSystemService
-        let output = await Task.detached(priority: .userInitiated) {
-            Self.searchRecursively(
-                in: readableFolder,
-                query: query,
-                currentDepth: 0,
-                maxDepth: depth,
-                service: service
-            )
-        }.value
-        access?.stop()
 
-        guard generation == searchGeneration, !Task.isCancelled else { return }
-        searchResults = output.items.sorted()
-        searchErrors = output.errors
-        errorMessage = output.errors.first
+        for stufe in 0...max(depth, 0) {
+            let output = await Task.detached(priority: .userInitiated) {
+                Self.searchRecursively(
+                    in: readableFolder,
+                    query: query,
+                    currentDepth: 0,
+                    maxDepth: stufe,
+                    service: service
+                )
+            }.value
+
+            guard generation == searchGeneration, !Task.isCancelled else {
+                access?.stop()
+                return
+            }
+
+            searchResults = output.items.sorted()
+            searchErrors = output.errors
+            errorMessage = output.errors.first
+        }
+
+        access?.stop()
+        guard generation == searchGeneration else { return }
         isSearching = false
     }
 
@@ -128,8 +151,10 @@ class SearchViewModel: ObservableObject {
                     results.append(item)
                 }
 
-                // Recursively search in subdirectories
-                if item.type == .folder {
+                // In Ordner hinein — aber nicht in Pakete. Eine Fotomediathek
+                // ist ein Dokument, kein Ordner voller Dateien; Finder geht dort
+                // ebenfalls nicht hinein.
+                if item.type == .folder, !item.isPackage {
                     let nested = searchRecursively(
                         in: item.path,
                         query: query,

@@ -93,3 +93,83 @@ private func modelWithResults() async throws -> (model: SearchViewModel, root: U
     #expect(model.isParked == false)
     #expect(model.isSearchActive)
 }
+
+/// Ein Klick neben das Suchfeld darf die Eingabe nicht wegwerfen — das war
+/// derselbe Verlust wie beim Öffnen eines Treffers, nur an anderer Stelle.
+@Test @MainActor func losingFocusKeepsATypedSearch() async throws {
+    let (model, _, cleanup) = try await modelWithResults()
+    defer { cleanup() }
+
+    // Was die Ansicht beim Fokusverlust prüft: nur eine leere Suche schliesst.
+    #expect(model.searchQuery.isEmpty == false)
+    #expect(model.isSearchActive)
+    #expect(model.searchResults.count == 2)
+}
+
+/// Die naheliegenden Treffer stehen sofort da, die tieferen kommen nach.
+@Test @MainActor func theCurrentFolderIsSearchedFirst() async throws {
+    let ordner = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("SearchStaged-\(UUID().uuidString)", isDirectory: true)
+    let tief = ordner.appendingPathComponent("eins/zwei", isDirectory: true)
+    try FileManager.default.createDirectory(at: tief, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: ordner) }
+
+    try Data().write(to: ordner.appendingPathComponent("treffer-oben.txt"))
+    try Data().write(to: tief.appendingPathComponent("treffer-tief.txt"))
+
+    let model = SearchViewModel()
+    model.activateSearch()
+    model.searchQuery = "treffer"
+    model.search(in: ordner)
+
+    for _ in 0..<100 where model.searchResults.count < 2 {
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+
+    // Am Ende sind beide da — die obere Ebene war zuerst dran.
+    #expect(model.searchResults.count == 2)
+    #expect(model.searchResults.contains { $0.name == "treffer-oben.txt" })
+    #expect(model.searchResults.contains { $0.name == "treffer-tief.txt" })
+}
+
+/// Ein Paket ist ein Dokument, kein Ordner voller Dateien. Wer hineinsucht,
+/// füllt die Trefferliste mit Innereien — und holt sich bei geschützten
+/// Mediatheken eine Rechte-Meldung, die wie ein Fehler aussieht.
+@Test @MainActor func packagesAreNotSearchedInside() async throws {
+    let ordner = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("SearchPackage-\(UUID().uuidString)", isDirectory: true)
+    let paket = ordner.appendingPathComponent("Mediathek.photoslibrary", isDirectory: true)
+    try FileManager.default.createDirectory(at: paket, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: ordner) }
+
+    try Data().write(to: ordner.appendingPathComponent("treffer-aussen.txt"))
+    try Data().write(to: paket.appendingPathComponent("treffer-innen.txt"))
+
+    let model = SearchViewModel()
+    model.activateSearch()
+    model.searchQuery = "treffer"
+    model.search(in: ordner)
+
+    for _ in 0..<60 where model.searchResults.isEmpty {
+        try await Task.sleep(nanoseconds: 20_000_000)
+    }
+    try await Task.sleep(nanoseconds: 300_000_000)   // auch die tieferen Stufen abwarten
+
+    #expect(model.searchResults.contains { $0.name == "treffer-aussen.txt" })
+    #expect(model.searchResults.contains { $0.name == "treffer-innen.txt" } == false)
+    #expect(model.searchErrors.isEmpty)
+}
+
+/// Das Paket selbst bleibt ein ganz normaler Eintrag — es wird nur nicht betreten.
+@Test func aPackageIsMarkedAsSuch() throws {
+    let ordner = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("PackageFlag-\(UUID().uuidString)", isDirectory: true)
+    let paket = ordner.appendingPathComponent("Ding.photoslibrary", isDirectory: true)
+    let normal = ordner.appendingPathComponent("Normaler Ordner", isDirectory: true)
+    try FileManager.default.createDirectory(at: paket, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: normal, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: ordner) }
+
+    #expect(try FileSystemItem(from: paket).isPackage)
+    #expect(try FileSystemItem(from: normal).isPackage == false)
+}

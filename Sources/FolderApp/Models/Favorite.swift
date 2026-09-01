@@ -321,6 +321,15 @@ class SidebarManager: ObservableObject {
         // Downloads
         let downloadsURL = homeURL.appendingPathComponent("Downloads")
         addFavorite(downloadsURL, name: "Downloads", icon: "arrow.down.circle.fill")
+
+        // Programme — bewusst /Applications, nicht ~/Applications.
+        //
+        // macOS legt beide an und sie heissen gleich. Der im Benutzerordner ist
+        // fast immer leer; installiert wird in den systemweiten. Finder führt in
+        // seiner Seitenleiste ebenfalls den systemweiten. Wer den Eintrag selbst
+        // aus dem Home-Ordner heraus anlegt, landet sonst beim leeren und hält
+        // das für einen Anzeigefehler.
+        addFavorite(URL(fileURLWithPath: "/Applications"), name: "Applications", icon: "square.grid.2x2.fill")
         addGoogleDriveIfMissing()
     }
 }

@@ -24,6 +24,14 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
     /// mitgenommen — ein zweiter Gang auf die Platte pro Kachel wäre bei
     /// tausend Dateien teuer.
     var colorTag: ColorTag.TagColor?
+    /// Ein Paket ist ein Ordner, den macOS als **ein Dokument** führt — eine
+    /// Fotomediathek, eine App, ein Keynote-Dokument. Von aussen ein Ordner,
+    /// für den Nutzer eine Datei.
+    ///
+    /// Beim Suchen wird nicht hineingegangen. Sonst stehen Hunderte interner
+    /// Dateien in der Trefferliste, und bei geschützten Mediatheken kommt eine
+    /// Rechte-Meldung dazu, die wie ein Fehler aussieht, aber keiner ist.
+    let isPackage: Bool
 
     enum FileType: String, Codable, Sendable {
         case file
@@ -60,10 +68,12 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
             .fileSizeKey,
             .contentModificationDateKey,
             .creationDateKey,
-            .labelNumberKey
+            .labelNumberKey,
+            .isPackageKey
         ])
 
         self.colorTag = FinderTagService.color(forLabelNumber: resourceValues.labelNumber)
+        self.isPackage = resourceValues.isPackage ?? false
 
         // Determine type
         if resourceValues.isSymbolicLink == true {
@@ -99,7 +109,8 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
         isRecent: Bool = false,
         parentPath: URL? = nil,
         isSymlink: Bool = false,
-        colorTag: ColorTag.TagColor? = nil
+        colorTag: ColorTag.TagColor? = nil,
+        isPackage: Bool = false
     ) {
         self.id = id
         self.path = path
@@ -114,6 +125,7 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
         self.parentPath = parentPath
         self.isSymlink = isSymlink
         self.colorTag = colorTag
+        self.isPackage = isPackage
     }
 
     /// Directory enumerations create fresh value objects. Preserve the ID of
@@ -133,7 +145,8 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
             isRecent: isRecent,
             parentPath: parentPath,
             isSymlink: isSymlink,
-            colorTag: colorTag
+            colorTag: colorTag,
+            isPackage: isPackage
         )
     }
 
