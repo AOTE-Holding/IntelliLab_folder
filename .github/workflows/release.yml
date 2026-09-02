@@ -3,6 +3,9 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Von Hand ausloesbar, damit ein Tag nach einer Korrektur am Ablauf nicht
+  # geloescht und neu gesetzt werden muss.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -28,6 +31,7 @@ jobs:
         id: check
         env:
           CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_APPLICATION_P12 }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           if [ -n "$CERTIFICATE_P12" ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
@@ -35,6 +39,13 @@ jobs:
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "No signing secrets — building an unsigned app."
+          fi
+          if [ -n "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "appcast=true" >> "$GITHUB_OUTPUT"
+            echo "Sparkle key present — the appcast will be generated."
+          else
+            echo "appcast=false" >> "$GITHUB_OUTPUT"
+            echo "No Sparkle key — publishing without an appcast, so the app cannot update itself."
           fi
 
       - name: Import Developer ID certificate
@@ -92,7 +103,7 @@ jobs:
       # Sparkle-Schluessel, nicht an Apple — deshalb entsteht er auch ohne
       # Zertifikat, sobald der private Schluessel hinterlegt ist.
       - name: Sign archive and generate appcast
-        if: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+        if: steps.check.outputs.appcast == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           DOWNLOAD_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
