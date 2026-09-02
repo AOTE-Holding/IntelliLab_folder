@@ -56,8 +56,11 @@ jobs:
           swift package resolve
           swift test -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
 
-      - name: Build signed app
-        if: steps.check.outputs.signed == 'true'
+      # Immer ein Release-Build. Fehlt die Apple-Signatur, warnt macOS beim
+      # ersten Oeffnen — die App kann sich aber trotzdem aktualisieren, denn
+      # dafuer buergt der Sparkle-Schluessel. Frueher wurde ohne Zertifikat ein
+      # Entwicklungs-Build veroeffentlicht, und der schaltet Updates von sich aus ab.
+      - name: Build app
         env:
           BUILD_CONFIGURATION: release
           BUNDLE_IDENTIFIER: ${{ secrets.BUNDLE_IDENTIFIER }}
@@ -65,10 +68,6 @@ jobs:
           CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
           SPARKLE_FEED_URL: ${{ secrets.SPARKLE_FEED_URL }}
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-        run: ./build.sh
-
-      - name: Build unsigned app
-        if: steps.check.outputs.signed != 'true'
         run: ./build.sh
 
       - name: Notarize and staple
@@ -88,16 +87,20 @@ jobs:
           mkdir -p releases
           ditto -c -k --keepParent --sequesterRsrc Folder.app releases/Folder.app.zip
 
-      # Der Appcast ist Sparkles Update-Verzeichnis. Er trägt eine Signatur und
-      # ist ohne privaten Schlüssel wertlos — ein unsignierter Eintrag würde von
-      # Sparkle ohnehin abgewiesen.
+      # Der Appcast ist Sparkles Update-Verzeichnis: Er sagt der installierten
+      # App, welche Version es gibt und wo sie liegt. Seine Signatur haengt am
+      # Sparkle-Schluessel, nicht an Apple — deshalb entsteht er auch ohne
+      # Zertifikat, sobald der private Schluessel hinterlegt ist.
       - name: Sign archive and generate appcast
-        if: steps.check.outputs.signed == 'true'
+        if: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          DOWNLOAD_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
         run: |
           GENERATE_APPCAST=$(find .build -type f -name generate_appcast -print -quit)
-          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" --ed-key-file - releases
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" \
+            --ed-key-file - --download-url-prefix "$DOWNLOAD_PREFIX" releases
+          echo "appcast:"; cat releases/appcast.xml | head -20
 
       - name: Compose release notes
         id: notes
