@@ -3,9 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # Von Hand ausloesbar, damit ein Tag nach einer Korrektur am Ablauf nicht
-  # geloescht und neu gesetzt werden muss.
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -31,7 +28,6 @@ jobs:
         id: check
         env:
           CERTIFICATE_P12: ${{ secrets.DEVELOPER_ID_APPLICATION_P12 }}
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
         run: |
           if [ -n "$CERTIFICATE_P12" ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
@@ -39,13 +35,6 @@ jobs:
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "No signing secrets — building an unsigned app."
-          fi
-          if [ -n "$SPARKLE_PRIVATE_KEY" ]; then
-            echo "appcast=true" >> "$GITHUB_OUTPUT"
-            echo "Sparkle key present — the appcast will be generated."
-          else
-            echo "appcast=false" >> "$GITHUB_OUTPUT"
-            echo "No Sparkle key — publishing without an appcast, so the app cannot update itself."
           fi
 
       - name: Import Developer ID certificate
@@ -67,11 +56,8 @@ jobs:
           swift package resolve
           swift test -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
 
-      # Immer ein Release-Build. Fehlt die Apple-Signatur, warnt macOS beim
-      # ersten Oeffnen — die App kann sich aber trotzdem aktualisieren, denn
-      # dafuer buergt der Sparkle-Schluessel. Frueher wurde ohne Zertifikat ein
-      # Entwicklungs-Build veroeffentlicht, und der schaltet Updates von sich aus ab.
-      - name: Build app
+      - name: Build signed app
+        if: steps.check.outputs.signed == 'true'
         env:
           BUILD_CONFIGURATION: release
           BUNDLE_IDENTIFIER: ${{ secrets.BUNDLE_IDENTIFIER }}
@@ -79,6 +65,10 @@ jobs:
           CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
           SPARKLE_FEED_URL: ${{ secrets.SPARKLE_FEED_URL }}
           SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+        run: ./build.sh
+
+      - name: Build unsigned app
+        if: steps.check.outputs.signed != 'true'
         run: ./build.sh
 
       - name: Notarize and staple
@@ -98,20 +88,16 @@ jobs:
           mkdir -p releases
           ditto -c -k --keepParent --sequesterRsrc Folder.app releases/Folder.app.zip
 
-      # Der Appcast ist Sparkles Update-Verzeichnis: Er sagt der installierten
-      # App, welche Version es gibt und wo sie liegt. Seine Signatur haengt am
-      # Sparkle-Schluessel, nicht an Apple — deshalb entsteht er auch ohne
-      # Zertifikat, sobald der private Schluessel hinterlegt ist.
+      # Der Appcast ist Sparkles Update-Verzeichnis. Er trägt eine Signatur und
+      # ist ohne privaten Schlüssel wertlos — ein unsignierter Eintrag würde von
+      # Sparkle ohnehin abgewiesen.
       - name: Sign archive and generate appcast
-        if: steps.check.outputs.appcast == 'true'
+        if: steps.check.outputs.signed == 'true'
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          DOWNLOAD_PREFIX: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
         run: |
           GENERATE_APPCAST=$(find .build -type f -name generate_appcast -print -quit)
-          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" \
-            --ed-key-file - --download-url-prefix "$DOWNLOAD_PREFIX" releases
-          echo "appcast:"; cat releases/appcast.xml | head -20
+          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" --ed-key-file - releases
 
       - name: Compose release notes
         id: notes

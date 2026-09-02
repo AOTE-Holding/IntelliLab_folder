@@ -15,30 +15,14 @@ QUICKLOOK_CONTENTS="${QUICKLOOK_APPEX}/Contents"
 QUICKLOOK_MACOS="${QUICKLOOK_CONTENTS}/MacOS"
 QUICKLOOK_EXECUTABLE="${QUICKLOOK_MACOS}/FolderQuickLookPreview"
 
-# Der Ort, an dem die App nach Updates fragt. Zeigt immer auf den Appcast des
-# jeweils neuesten Releases — die Adresse aendert sich also nie, der Inhalt schon.
-SPARKLE_FEED_DEFAULT="https://github.com/AOTE-Holding/IntelliLab_folder/releases/latest/download/appcast.xml"
-# Der oeffentliche Teil des Sparkle-Schluessels. Oeffentlich im Wortsinn: er
-# gehoert in die App, damit sie eine Aktualisierung pruefen kann. Der private
-# Teil liegt im Schluesselbund und als GitHub-Secret.
-SPARKLE_PUBLIC_ED_KEY_DEFAULT="1jiUa2lW2NeJLsT2PX5UnwQCnxahE0q8Bdjck+mhUE4="
-
 if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then
-  # Eine Apple-Signatur ist wuenschenswert, aber keine Bedingung fuer einen
-  # Release. Ohne sie warnt macOS beim ersten Oeffnen — die App kann sich
-  # trotzdem selbst aktualisieren, denn dafuer buergt der Sparkle-Schluessel,
-  # nicht Apple. Frueher verlangte dieser Zweig fuenf Angaben und brach ohne
-  # sie ab; das Ergebnis war, dass jeder Build eine Entwicklungsversion blieb
-  # und die App Updates von sich aus abschaltete.
-  BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.intellilab.folder}"
-  CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
-  DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-}"
-  SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-$SPARKLE_FEED_DEFAULT}"
-  SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-$SPARKLE_PUBLIC_ED_KEY_DEFAULT}"
-
-  if [[ "${CODE_SIGN_IDENTITY}" == "-" ]]; then
-    echo "Note: building without an Apple Developer ID. Updates work, macOS will warn on first open."
-  fi
+  required=(BUNDLE_IDENTIFIER DEVELOPMENT_TEAM CODE_SIGN_IDENTITY SPARKLE_FEED_URL SPARKLE_PUBLIC_ED_KEY)
+  for variable in "${required[@]}"; do
+    if [[ -z "${!variable:-}" ]]; then
+      echo "Release configuration is missing ${variable}." >&2
+      exit 1
+    fi
+  done
 else
   BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.intellilab.folder.development}"
   CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
