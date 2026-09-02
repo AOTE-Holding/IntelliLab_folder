@@ -8,7 +8,6 @@ APP_BUNDLE="${APP_NAME}.app"
 CONTENTS="${APP_BUNDLE}/Contents"
 MACOS="${CONTENTS}/MacOS"
 RESOURCES="${CONTENTS}/Resources"
-FRAMEWORKS="${CONTENTS}/Frameworks"
 PLUGINS="${CONTENTS}/PlugIns"
 QUICKLOOK_APPEX="${PLUGINS}/FolderQuickLookPreview.appex"
 QUICKLOOK_CONTENTS="${QUICKLOOK_APPEX}/Contents"
@@ -16,7 +15,7 @@ QUICKLOOK_MACOS="${QUICKLOOK_CONTENTS}/MacOS"
 QUICKLOOK_EXECUTABLE="${QUICKLOOK_MACOS}/FolderQuickLookPreview"
 
 if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then
-  required=(BUNDLE_IDENTIFIER DEVELOPMENT_TEAM CODE_SIGN_IDENTITY SPARKLE_FEED_URL SPARKLE_PUBLIC_ED_KEY)
+  required=(BUNDLE_IDENTIFIER DEVELOPMENT_TEAM CODE_SIGN_IDENTITY)
   for variable in "${required[@]}"; do
     if [[ -z "${!variable:-}" ]]; then
       echo "Release configuration is missing ${variable}." >&2
@@ -27,15 +26,13 @@ else
   BUNDLE_IDENTIFIER="${BUNDLE_IDENTIFIER:-com.intellilab.folder.development}"
   CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:--}"
   DEVELOPMENT_TEAM="${DEVELOPMENT_TEAM:-}"
-  SPARKLE_FEED_URL="${SPARKLE_FEED_URL:-https://invalid.example/appcast.xml}"
-  SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-DEVELOPMENT_BUILD_NO_KEY}"
 fi
 
 echo "Building ${APP_NAME} ${APP_VERSION} (${BUILD_CONFIGURATION})"
 swift build -c release -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
 
 rm -rf "${APP_BUNDLE}"
-mkdir -p "${MACOS}" "${RESOURCES}" "${FRAMEWORKS}" "${QUICKLOOK_MACOS}"
+mkdir -p "${MACOS}" "${RESOURCES}" "${QUICKLOOK_MACOS}"
 ditto ".build/release/Folder" "${MACOS}/${APP_NAME}"
 ditto "Resources/AppIcon.icns" "${RESOURCES}/AppIcon.icns"
 
@@ -68,44 +65,17 @@ ditto "QuickLookExtension/Info.plist.template" "${QUICKLOOK_PLIST}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION}" "${QUICKLOOK_PLIST}"
 chmod +x "${QUICKLOOK_EXECUTABLE}"
 
-SPARKLE_FRAMEWORK="$(find .build -path '*/Sparkle.framework' -type d -print -quit)"
-if [[ -z "${SPARKLE_FRAMEWORK}" ]]; then
-  echo "Sparkle.framework was not produced by SwiftPM." >&2
-  exit 1
-fi
-ditto "${SPARKLE_FRAMEWORK}" "${FRAMEWORKS}/Sparkle.framework"
-folder_otool_output="$(otool -l "${MACOS}/${APP_NAME}")"
-if ! grep -Fq '@executable_path/../Frameworks' <<< "${folder_otool_output}"; then
-  install_name_tool -add_rpath '@executable_path/../Frameworks' "${MACOS}/${APP_NAME}"
-fi
-
 PLIST="${CONTENTS}/Info.plist"
 ditto Resources/Info.plist.template "${PLIST}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier ${BUNDLE_IDENTIFIER}" "${PLIST}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${APP_VERSION}" "${PLIST}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${APP_VERSION}" "${PLIST}"
-/usr/libexec/PlistBuddy -c "Set :SUFeedURL ${SPARKLE_FEED_URL}" "${PLIST}"
-/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey ${SPARKLE_PUBLIC_ED_KEY}" "${PLIST}"
 /usr/libexec/PlistBuddy -c "Set :CFBundleURLTypes:0:CFBundleURLName ${BUNDLE_IDENTIFIER}" "${PLIST}"
 
 chmod +x "${MACOS}/${APP_NAME}"
 SIGN_OPTIONS=(--options runtime)
 if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then SIGN_OPTIONS+=(--timestamp); fi
 
-# Sparkle's nested services must be signed inside-out. `--deep` verification
-# alone does not catch a Team-ID mismatch at dyld load time.
-SPARKLE_VERSION="${FRAMEWORKS}/Sparkle.framework/Versions/B"
-codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
-  "${SPARKLE_VERSION}/XPCServices/Installer.xpc"
-codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
-  --preserve-metadata=entitlements \
-  "${SPARKLE_VERSION}/XPCServices/Downloader.xpc"
-codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
-  "${SPARKLE_VERSION}/Autoupdate"
-codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
-  "${SPARKLE_VERSION}/Updater.app"
-codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
-  "${FRAMEWORKS}/Sparkle.framework"
 codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
   --entitlements "QuickLookExtension/FolderQuickLookPreview.entitlements" \
   "${QUICKLOOK_APPEX}"
@@ -122,8 +92,14 @@ codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
 if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then
   actual_bundle_id="$(codesign -dv --verbose=4 "${APP_BUNDLE}" 2>&1 | sed -n 's/^Identifier=//p')"
   actual_team_id="$(codesign -dv --verbose=4 "${APP_BUNDLE}" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-  [[ "${actual_bundle_id}" == "${BUNDLE_IDENTIFIER}" ]]
-  [[ "${actual_team_id}" == "${DEVELOPMENT_TEAM}" ]]
+  if [[ "${actual_bundle_id}" != "${BUNDLE_IDENTIFIER}" ]]; then
+    echo "Release bundle identifier does not match ${BUNDLE_IDENTIFIER}." >&2
+    exit 1
+  fi
+  if [[ "${actual_team_id}" != "${DEVELOPMENT_TEAM}" ]]; then
+    echo "Release signing team does not match ${DEVELOPMENT_TEAM}." >&2
+    exit 1
+  fi
 fi
 
 echo "Created ${APP_BUNDLE}"

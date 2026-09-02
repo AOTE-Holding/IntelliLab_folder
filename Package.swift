@@ -15,14 +15,12 @@ let package = Package(
         )
     ],
     dependencies: [
-        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.4"),
         .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
     ],
     targets: [
         .executableTarget(
             name: "FolderApp",
             dependencies: [
-                .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "ZIPFoundation", package: "ZIPFoundation")
             ],
             path: "Sources/FolderApp",

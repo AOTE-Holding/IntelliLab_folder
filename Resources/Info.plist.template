@@ -18,9 +18,6 @@
     <key>NSDocumentsFolderUsageDescription</key><string>Folder needs access to browse your documents.</string>
     <key>NSDownloadsFolderUsageDescription</key><string>Folder needs access to browse your downloads.</string>
     <key>NSAppleEventsUsageDescription</key><string>Folder uses automation only when you ask it to open Terminal or iTerm at a folder.</string>
-    <key>SUFeedURL</key><string>SPARKLE_FEED_URL</string>
-    <key>SUPublicEDKey</key><string>SPARKLE_PUBLIC_ED_KEY</string>
-    <key>SUEnableInstallerLauncherService</key><true/>
     <key>CFBundleURLTypes</key>
     <array><dict>
         <key>CFBundleURLName</key><string>BUNDLE_IDENTIFIER</string>

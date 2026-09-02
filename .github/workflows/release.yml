@@ -63,8 +63,6 @@ jobs:
           BUNDLE_IDENTIFIER: ${{ secrets.BUNDLE_IDENTIFIER }}
           DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
           CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
-          SPARKLE_FEED_URL: ${{ secrets.SPARKLE_FEED_URL }}
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
         run: ./build.sh
 
       - name: Build unsigned app
@@ -87,17 +85,6 @@ jobs:
         run: |
           mkdir -p releases
           ditto -c -k --keepParent --sequesterRsrc Folder.app releases/Folder.app.zip
-
-      # Der Appcast ist Sparkles Update-Verzeichnis. Er trägt eine Signatur und
-      # ist ohne privaten Schlüssel wertlos — ein unsignierter Eintrag würde von
-      # Sparkle ohnehin abgewiesen.
-      - name: Sign archive and generate appcast
-        if: steps.check.outputs.signed == 'true'
-        env:
-          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-        run: |
-          GENERATE_APPCAST=$(find .build -type f -name generate_appcast -print -quit)
-          printf '%s' "$SPARKLE_PRIVATE_KEY" | "$GENERATE_APPCAST" --ed-key-file - releases
 
       - name: Compose release notes
         id: notes
