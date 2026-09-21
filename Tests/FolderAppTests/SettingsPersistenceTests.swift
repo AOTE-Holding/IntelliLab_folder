@@ -77,3 +77,28 @@ import Testing
     #expect(ConfigStore.suiteName == "com.intellilab.folder")
     #expect(ConfigStore.suiteName != Bundle.main.bundleIdentifier)
 }
+
+@Test func globalHotkeyAlwaysRetainsAModifier() throws {
+    var hotkey = GlobalHotkey()
+    hotkey.toggleModifier(.command)
+    #expect(hotkey.modifiers == [.command])
+
+    hotkey.toggleModifier(.control)
+    hotkey.toggleModifier(.command)
+    #expect(hotkey.modifiers == [.control])
+    hotkey.toggleModifier(.control)
+    #expect(hotkey.modifiers == [.control])
+
+    hotkey.modifiers = []
+    #expect(hotkey.modifiers == [.command])
+    #expect(GlobalHotkey(modifiers: []).modifiers == [.command])
+
+    let saved = """
+    {"globalHotkey":{"enabled":true,"key":"q","modifiers":[]},"theme":"dark"}
+    """
+    let restored = try JSONDecoder().decode(AppSettings.self, from: Data(saved.utf8))
+    #expect(restored.globalHotkey.enabled)
+    #expect(restored.globalHotkey.modifiers == [.command])
+    #expect(restored.globalHotkey.displayString == "⌘Q")
+    #expect(restored.theme == .dark)
+}

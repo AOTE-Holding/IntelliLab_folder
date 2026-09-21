@@ -89,23 +89,32 @@ jobs:
       - name: Compose release notes
         id: notes
         run: |
-          if [ "${{ steps.check.outputs.signed }}" = "true" ]; then
-            echo "body=" >> "$GITHUB_OUTPUT"
-          else
-            {
-              echo 'body<<NOTE'
-              echo '## Install'
-              echo
-              echo '1. Download `Folder.app.zip` below.'
-              echo '2. Unzip it and drag `Folder.app` to `/Applications`.'
-              echo '3. Open Folder.'
-              echo
+          {
+            echo 'body<<NOTE'
+            echo '## Install'
+            echo
+            echo '1. Download `Folder.app.zip` below.'
+            echo '2. Unzip it and drag `Folder.app` to `/Applications`.'
+            echo '3. Open Folder.'
+            echo
+            echo '## Updates'
+            echo
+            echo 'Folder uses its GitHub Release updater. Choose **Check for Updates…** to download and install the newest `Folder.app.zip` directly from GitHub.'
+            echo
+            echo '## Build verification'
+            echo
+            echo "Version: ${GITHUB_REF_NAME#v}"
+            echo 'Tests: Swift test suite passed in the release workflow.'
+            echo
+            if [ "${{ steps.check.outputs.signed }}" = "true" ]; then
+              echo 'Release-mode build, signed and notarized with the configured Developer ID certificate.'
+            else
               echo '> This package is built without an Apple signature, because the'
               echo '> signing secrets are not configured for this repository. macOS'
               echo '> may ask for confirmation the first time it is opened.'
-              echo 'NOTE'
-            } >> "$GITHUB_OUTPUT"
-          fi
+            fi
+            echo 'NOTE'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create release
         uses: softprops/action-gh-release@v2

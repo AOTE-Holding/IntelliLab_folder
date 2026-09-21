@@ -33,6 +33,8 @@ class DraggableView: NSView, NSDraggingSource {
     private var dragStartPoint: NSPoint?
     private var isDragging = false
     private var isHoveringDestination = false
+    private var pendingSingleClickModifiers: NSEvent.ModifierFlags?
+    private var activeDragURLs: [URL] = []
 
     /// Diese Ansicht liegt ueber der Kachel und faengt jedes Ziehen ab, das sie
     /// annimmt. Ein Typ, der hier fehlt, kommt deshalb nirgends mehr an — auch
@@ -64,14 +66,22 @@ class DraggableView: NSView, NSDraggingSource {
     }
 
     override func mouseDown(with event: NSEvent) {
+        Self.releaseTextFieldFocus(in: window)
         if dragEnabled && !fileURLs.isEmpty {
             dragStartPoint = convert(event.locationInWindow, from: nil)
             isDragging = false
+            pendingSingleClickModifiers = nil
             // Finder selects on the first mouse-down instead of waiting for
             // the system double-click interval to expire. The second click is
             // reserved for opening the already selected item.
             if Self.action(forMouseDownClickCount: event.clickCount) == .select {
-                onSingleClick?(event.modifierFlags)
+                if Self.shouldDeferSelection(fileCount: fileURLs.count, modifiers: event.modifierFlags) {
+                    // A press on an already selected item may become a group
+                    // drag. Collapse the selection only if the press ends as a click.
+                    pendingSingleClickModifiers = event.modifierFlags
+                } else {
+                    onSingleClick?(event.modifierFlags)
+                }
             }
         } else {
             super.mouseDown(with: event)
@@ -91,9 +101,10 @@ class DraggableView: NSView, NSDraggingSource {
         guard distance > 5 else { return }
 
         isDragging = true
+        activeDragURLs = fileURLs
 
         var draggingItems: [NSDraggingItem] = []
-        for (index, url) in fileURLs.enumerated() {
+        for (index, url) in activeDragURLs.enumerated() {
             let item = NSDraggingItem(pasteboardWriter: url as NSURL)
             let icon = NSWorkspace.shared.icon(forFile: url.path)
             icon.size = NSSize(width: 32, height: 32)
@@ -104,7 +115,7 @@ class DraggableView: NSView, NSDraggingSource {
         }
 
         let session = beginDraggingSession(with: draggingItems, event: event, source: self)
-        let filePaths = fileURLs.map { $0.path }
+        let filePaths = activeDragURLs.map { $0.path }
         session.draggingPasteboard.setPropertyList(filePaths, forType: NSPasteboard.PasteboardType(rawValue: "NSFilenamesPboardType"))
 
         dragStartPoint = nil
@@ -112,6 +123,9 @@ class DraggableView: NSView, NSDraggingSource {
 
     override func mouseUp(with event: NSEvent) {
         if !isDragging, dragStartPoint != nil {
+            if let pendingSingleClickModifiers {
+                onSingleClick?(pendingSingleClickModifiers)
+            }
             // Selection already happened on the first mouse-down. Only the
             // second mouse-up performs the open action.
             if Self.action(forMouseUpClickCount: event.clickCount) == .open {
@@ -120,6 +134,7 @@ class DraggableView: NSView, NSDraggingSource {
         }
         dragStartPoint = nil
         isDragging = false
+        pendingSingleClickModifiers = nil
     }
 
     nonisolated static func action(forMouseDownClickCount clickCount: Int) -> NativeFileClickAction {
@@ -128,6 +143,25 @@ class DraggableView: NSView, NSDraggingSource {
 
     nonisolated static func action(forMouseUpClickCount clickCount: Int) -> NativeFileClickAction {
         clickCount >= 2 ? .open : .none
+    }
+
+    nonisolated static func shouldDeferSelection(fileCount: Int, modifiers: NSEvent.ModifierFlags) -> Bool {
+        fileCount > 1 && modifiers.intersection([.command, .shift]).isEmpty
+    }
+
+    /// Ein Klick in den Browser gibt den Tastaturfokus des Such- oder
+    /// Pfadfelds frei. Solange der dort liegt, verwirft die Tastenbehandlung
+    /// jede Pfeiltaste, und die eingestellte Ordnernavigation bleibt tot.
+    ///
+    /// Die geklickte Ansicht wird dabei bewusst nicht selbst Erstempfänger:
+    /// Kacheln verschwinden beim Umbenennen aus der Ansicht, und ein Fokus
+    /// auf ihnen ginge in dem Moment mit verloren — das Eingabefeld stünde
+    /// dann offen da, ohne Tasten anzunehmen.
+    static func releaseTextFieldFocus(in window: NSWindow?) {
+        guard let window,
+              window.firstResponder is NSTextView || window.firstResponder is NSTextField
+        else { return }
+        window.makeFirstResponder(nil)
     }
 
     // MARK: - NSDraggingSource
@@ -139,13 +173,15 @@ class DraggableView: NSView, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
         if operation == .delete {
-            let urls = fileURLs
+            let urls = activeDragURLs
             Task { @MainActor in
                 FileOperationCoordinator.shared.moveToTrash(urls)
             }
         }
         isDragging = false
         dragStartPoint = nil
+        pendingSingleClickModifiers = nil
+        activeDragURLs = []
     }
 
     // MARK: - NSDraggingDestination
@@ -355,6 +391,7 @@ struct ImmediateBackgroundClickView: NSViewRepresentable {
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
         override func mouseDown(with event: NSEvent) {
+            DraggableView.releaseTextFieldFocus(in: window)
             action()
         }
     }

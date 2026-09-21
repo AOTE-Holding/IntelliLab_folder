@@ -7,6 +7,14 @@ import Foundation
 final class UpdateService: NSObject, ObservableObject {
     static let shared = UpdateService()
 
+    enum CheckResult: Equatable {
+        case upToDate
+        case installable(version: String, notes: String, downloadURL: URL)
+        case missingAsset(version: String)
+        case failed(message: String)
+        case skipped
+    }
+
     @Published private(set) var updateAvailable = false
     @Published private(set) var latestVersion = ""
     @Published private(set) var releaseNotes = ""
@@ -14,36 +22,60 @@ final class UpdateService: NSObject, ObservableObject {
 
     private let apiURL = URL(string: "https://api.github.com/repos/AOTE-Holding/IntelliLab_folder/releases/latest")!
     private let lastCheckKey = "UpdateService.lastCheckDate"
+    private let session: URLSession
+    private let defaults: UserDefaults
+    private let now: () -> Date
     private var downloadURL: URL?
 
-    private override init() {
+    init(session: URLSession = .shared, defaults: UserDefaults = .standard, now: @escaping () -> Date = Date.init) {
+        self.session = session
+        self.defaults = defaults
+        self.now = now
         super.init()
     }
 
     func checkInBackground() {
         Task {
-            await check(silent: true)
-            if updateAvailable { showUpdateAlert() }
+            switch await check(silent: true) {
+            case .installable:
+                showUpdateAlert()
+            case .missingAsset(let version):
+                showMissingAssetAlert(version: version)
+            case .upToDate, .failed, .skipped:
+                break
+            }
         }
     }
 
     func checkForUpdates() {
         Task {
-            await check(silent: false)
-            if updateAvailable {
+            switch await check(silent: false) {
+            case .installable:
                 showUpdateAlert()
-            } else {
+            case .upToDate:
                 showUpToDateAlert()
+            case .missingAsset(let version):
+                showMissingAssetAlert(version: version)
+            case .failed(let message):
+                showError(message)
+            case .skipped:
+                break
             }
         }
     }
 
-    private func check(silent: Bool) async {
+    func check(silent: Bool) async -> CheckResult {
         if silent,
-           let lastCheck = UserDefaults.standard.object(forKey: lastCheckKey) as? Date,
-           Date().timeIntervalSince(lastCheck) < 60 * 60 {
-            return
+           let lastCheck = defaults.object(forKey: lastCheckKey) as? Date,
+           now().timeIntervalSince(lastCheck) < 60 * 60 {
+            return .skipped
         }
+
+        updateAvailable = false
+        downloadURL = nil
+        // A failed request is still a completed attempt. Throttle background
+        // checks after HTTP, network, and decoding failures as well.
+        defer { defaults.set(now(), forKey: lastCheckKey) }
 
         var request = URLRequest(url: apiURL)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
@@ -51,28 +83,38 @@ final class UpdateService: NSObject, ObservableObject {
         request.timeoutInterval = 15
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse, response.statusCode == 200 else {
-                if !silent { showError("Could not check for updates.") }
-                return
+                return .failed(message: "Could not check GitHub for updates. Please try again later.")
             }
 
             let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
-            let version = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
-            guard let archive = release.assets.first(where: { $0.name == "Folder.app.zip" }),
-                  isNewerVersion(version, than: currentVersion) else {
-                updateAvailable = false
-                return
+            let result = Self.assess(release, currentVersion: currentVersion)
+            switch result {
+            case .installable(let version, let notes, let archiveURL):
+                latestVersion = version
+                releaseNotes = notes
+                downloadURL = archiveURL
+                updateAvailable = true
+            case .missingAsset(let version):
+                latestVersion = version
+                releaseNotes = release.body ?? ""
+            case .upToDate, .failed, .skipped:
+                break
             }
-
-            UserDefaults.standard.set(Date(), forKey: lastCheckKey)
-            latestVersion = version
-            releaseNotes = release.body ?? ""
-            downloadURL = archive.downloadURL
-            updateAvailable = true
+            return result
         } catch {
-            if !silent { showError("Failed to check for updates: \(error.localizedDescription)") }
+            return .failed(message: "Failed to check for updates: \(error.localizedDescription)")
         }
+    }
+
+    static func assess(_ release: GitHubRelease, currentVersion: String) -> CheckResult {
+        let version = release.tagName.hasPrefix("v") ? String(release.tagName.dropFirst()) : release.tagName
+        guard isNewerVersion(version, than: currentVersion) else { return .upToDate }
+        guard let archive = release.assets.first(where: { $0.name == "Folder.app.zip" }) else {
+            return .missingAsset(version: version)
+        }
+        return .installable(version: version, notes: release.body ?? "", downloadURL: archive.downloadURL)
     }
 
     private func showUpdateAlert() {
@@ -90,6 +132,14 @@ final class UpdateService: NSObject, ObservableObject {
         let alert = NSAlert()
         alert.messageText = "You're up to date!"
         alert.informativeText = "Folder \(currentVersion) is the latest version."
+        alert.runModal()
+    }
+
+    private func showMissingAssetAlert(version: String) {
+        let alert = NSAlert()
+        alert.messageText = "Update Not Installable"
+        alert.informativeText = "Folder \(version) is newer, but this release does not include Folder.app.zip. It cannot be installed from Folder."
+        alert.alertStyle = .warning
         alert.runModal()
     }
 
@@ -146,27 +196,7 @@ final class UpdateService: NSObject, ObservableObject {
         let scriptURL = appSupportDirectory().appendingPathComponent("install-update.sh")
         let backupURL = installURL.deletingLastPathComponent().appendingPathComponent(".Folder.previous.app")
 
-        let script = """
-        #!/bin/bash
-        set -eu
-        source_app="$1"
-        target_app="$2"
-        backup_app="$3"
-        script_path="$0"
-        sleep 1
-        rm -rf "$backup_app"
-        if [ -d "$target_app" ]; then mv "$target_app" "$backup_app"; fi
-        if ditto "$source_app" "$target_app"; then
-          xattr -cr "$target_app" || true
-          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$target_app" || true
-          rm -rf "$backup_app"
-          open "$target_app"
-        else
-          [ -d "$backup_app" ] && mv "$backup_app" "$target_app"
-          exit 1
-        fi
-        rm -f "$script_path"
-        """
+        let script = Self.installerScript
 
         do {
             try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -190,11 +220,42 @@ final class UpdateService: NSObject, ObservableObject {
         }
     }
 
+    static let installerScript = """
+        #!/bin/bash
+        set -eu
+        source_app="$1"
+        target_app="$2"
+        backup_app="$3"
+        script_path="$0"
+        sleep 1
+        rm -rf "$backup_app"
+        if [ -d "$target_app" ]; then mv "$target_app" "$backup_app"; fi
+        if ditto "$source_app" "$target_app"; then
+          xattr -cr "$target_app" || true
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$target_app" || true
+          rm -rf "$backup_app"
+          open "$target_app"
+        else
+          # ditto can leave a partial target. Remove it before mv so the
+          # backup returns to its original path rather than nesting inside it.
+          if [ -e "$target_app" ]; then rm -rf "$target_app"; fi
+          if [ -d "$backup_app" ]; then
+            mv "$backup_app" "$target_app"
+            if [ ! -d "$target_app" ] || [ -e "$backup_app" ]; then
+              echo "Update rollback did not restore the previous app" >&2
+              exit 1
+            fi
+          fi
+          exit 1
+        fi
+        rm -f "$script_path"
+        """
+
     private var currentVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
     }
 
-    private func isNewerVersion(_ candidate: String, than current: String) -> Bool {
+    private static func isNewerVersion(_ candidate: String, than current: String) -> Bool {
         let candidateParts = candidate.split(separator: ".").compactMap { Int($0) }
         let currentParts = current.split(separator: ".").compactMap { Int($0) }
         for index in 0..<max(candidateParts.count, currentParts.count) {
@@ -229,7 +290,7 @@ final class UpdateService: NSObject, ObservableObject {
     }
 }
 
-private struct GitHubRelease: Decodable {
+struct GitHubRelease: Decodable {
     let tagName: String
     let body: String?
     let assets: [GitHubReleaseAsset]
@@ -241,7 +302,7 @@ private struct GitHubRelease: Decodable {
     }
 }
 
-private struct GitHubReleaseAsset: Decodable {
+struct GitHubReleaseAsset: Decodable {
     let name: String
     let downloadURL: URL
 

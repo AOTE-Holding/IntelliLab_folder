@@ -9,10 +9,18 @@ class VolumeManager: ObservableObject {
     /// Emitted after macOS has actually removed a mounted volume. Consumers
     /// use this to leave any directory that belonged to the ejected device.
     @Published private(set) var lastUnmountedVolumeURL: URL?
+    @Published private(set) var lastEjectError: String?
+    private let ejectDevice: @MainActor (URL) throws -> Void
 
-    private init() {
-        setupNotifications()
-        reloadMountedVolumes()
+    init(
+        ejectDevice: @escaping @MainActor (URL) throws -> Void = { try NSWorkspace.shared.unmountAndEjectDevice(at: $0) },
+        observesWorkspace: Bool = true
+    ) {
+        self.ejectDevice = ejectDevice
+        if observesWorkspace {
+            setupNotifications()
+            reloadMountedVolumes()
+        }
     }
 
     private func setupNotifications() {
@@ -116,7 +124,16 @@ class VolumeManager: ObservableObject {
     }
 
     func ejectVolume(_ volume: VolumeInfo) {
-        try? NSWorkspace.shared.unmountAndEjectDevice(at: volume.url)
+        lastEjectError = nil
+        do {
+            try ejectDevice(volume.url)
+        } catch {
+            lastEjectError = "Could not eject “\(volume.name)”: \(error.localizedDescription)"
+        }
+    }
+
+    func clearEjectError() {
+        lastEjectError = nil
     }
 
     deinit {

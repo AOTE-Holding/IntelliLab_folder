@@ -105,7 +105,7 @@ struct FileListView: View {
             FileListRowWithRename(
                 item: item,
                 isSelected: viewModel.isSelected(item),
-                isRenaming: false,
+                isRenaming: viewModel.renamingItem == item.id,
                 clipboardManager: clipboardManager,
                 fileExplorerViewModel: viewModel,
                 isDimmed: showDimmed,
@@ -129,7 +129,8 @@ struct FileListView: View {
                     )
             }
             .overlay {
-                Color.clear.multiFileDrag(
+                if viewModel.renamingItem != item.id {
+                    Color.clear.multiFileDrag(
                     urls: viewModel.isSelected(item)
                         ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
                         : [item.path],
@@ -144,7 +145,9 @@ struct FileListView: View {
                     onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
                     onDoubleClick: { handleDoubleClick(item) },
                     onColorTagDrop: { farbe in
-                        viewModel.applyColorTag(farbe, to: tagDropTargets(for: item))
+                        viewModel.applyColorTag(farbe, to: tagDropTargets(for: item)) {
+                            searchViewModel.refreshTagsIfNeeded()
+                        }
                     },
                     onColorTagHover: { aktiv in
                         if aktiv {
@@ -153,7 +156,8 @@ struct FileListView: View {
                             tagDropTargetID = nil
                         }
                     }
-                )
+                    )
+                }
             }
             .contextMenu {
                 FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
@@ -287,7 +291,7 @@ struct FileListRowWithRename: View {
                     if let thumbnail = thumbnail {
                         Image(nsImage: thumbnail)
                             .resizable()
-                            .aspectRatio(contentMode: .fill)
+                            .aspectRatio(contentMode: .fit)
                             .frame(width: 20, height: 20)
                             .clipShape(RoundedRectangle(cornerRadius: 2))
                     } else {
@@ -312,7 +316,7 @@ struct FileListRowWithRename: View {
                     renamingFocusedID = nil
                 }
                 .onAppear {
-                    renamingFocusedID = item.id
+                    focusRenameField()
                 }
 
                 Spacer()
@@ -343,6 +347,24 @@ struct FileListRowWithRename: View {
                 fileExplorerViewModel: fileExplorerViewModel,
                 isDimmed: isDimmed
             )
+        }
+    }
+
+    /// Bei Dateien wird der Name vor der letzten Endung vorausgewählt. Die
+    /// Endung bleibt im Textfeld editierbar; Cmd-A wählt weiterhin alles aus.
+    private func focusRenameField() {
+        renamingFocusedID = item.id
+
+        let name = item.name as NSString
+        let lastDot = name.range(of: ".", options: .backwards)
+        let selectedLength = item.type == .file && lastDot.location > 0
+            ? lastDot.location
+            : name.length
+
+        DispatchQueue.main.async {
+            guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView,
+                  editor.string == item.name else { return }
+            editor.setSelectedRange(NSRange(location: 0, length: selectedLength))
         }
     }
 }
@@ -392,7 +414,7 @@ struct FileListRow: View {
                     // Show thumbnail preview
                     Image(nsImage: thumbnail)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: .fit)
                         .frame(width: 20, height: 20)
                         .clipShape(RoundedRectangle(cornerRadius: 2))
                 } else {
@@ -483,11 +505,24 @@ struct FileListRow: View {
                 icon = geladen
             }
 
-            // Load thumbnail for images and PDFs
-            if thumbnailService.supportsThumbnail(for: item.path.path) {
-                thumbnail = await thumbnailService.getThumbnail(for: item.path.path, size: CGSize(width: 40, height: 40))
-            }
+            await loadThumbnail()
         }
+        .onChange(of: thumbnailService.cacheGeneration) { _ in
+            guard thumbnailService.invalidatedThumbnailPath == item.path.standardizedFileURL.path else { return }
+            Task { await loadThumbnail() }
+        }
+    }
+
+    @MainActor
+    private func loadThumbnail() async {
+        guard thumbnailService.supportsThumbnail(for: item.path.path) else { return }
+        let generation = thumbnailService.cacheGeneration
+        let image = await thumbnailService.getThumbnail(
+            for: item.path.path,
+            size: CGSize(width: 40, height: 40)
+        )
+        guard generation == thumbnailService.cacheGeneration else { return }
+        thumbnail = image
     }
 
     private func formatFileSize(_ bytes: Int64) -> String {

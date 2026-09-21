@@ -50,6 +50,14 @@ struct ColorTag: Codable, Equatable, Hashable {
     }
 }
 
+/// Ein einzelner Fehler aus einem Tag-Durchgang. Der Typ bleibt bewusst klein,
+/// damit die Dateiarbeit ausserhalb des Main Actors stattfinden kann und erst
+/// danach genau eine verständliche Meldung für den ganzen Durchgang entsteht.
+private struct TagFehler: Sendable {
+    let datei: URL
+    let grund: String
+}
+
 @MainActor
 class SidebarManager: ObservableObject {
     static let shared = SidebarManager()
@@ -196,16 +204,92 @@ class SidebarManager: ObservableObject {
     /// bereich lehnt macOS den Zugriff ab. Der Ordnerinhalt wird seit je so
     /// gelesen; beim Tag fehlte es, und der Fehler ging still verloren.
     func setColorTag(for path: URL, tag: ColorTag?) {
-        let access = PermissionCenter.shared.beginAccess(to: path)
-        defer { access?.stop() }
+        let ordner = path.deletingLastPathComponent()
+        let zugriff = PermissionCenter.shared.beginAccess(to: ordner)
+        let fehler = Self.schreibe(tag?.color, auf: [path], inOrdner: ordner, zugriff: zugriff)
+        zugriff?.stop()
 
-        do {
-            try FinderTagService.setColorTag(tag?.color, for: access?.url ?? path)
-            TagIndex.shared.note(tag?.color, for: path)
+        if fehler.isEmpty { TagIndex.shared.note(tag?.color, for: path) }
+        melde(fehler, versucht: 1)
+    }
+
+    /// Dasselbe für viele Dateien auf einmal.
+    ///
+    /// Drei Dinge, die bei einer Mehrfachauswahl jedes für sich die App
+    /// anhalten liessen, sind hier zusammengelegt:
+    ///
+    /// **Das Schreiben läuft nicht im Vordergrund.** Jede Datei kostet ein
+    /// Lesen, ein Schreiben und eine Prüflesung auf der Platte. Bei tausend
+    /// Dateien stand die Oberfläche so lange still.
+    ///
+    /// **Das Zugriffsrecht wird pro Ordner geholt, nicht pro Datei.** Ein
+    /// Lesezeichen aufzulösen ist die teure Stelle, und es gilt für den ganzen
+    /// Ordner — einmal pro Ordner genügt also.
+    ///
+    /// **Jeder Fehler wird gezählt.** Vorher überschrieb die nächste Datei die
+    /// Meldung der vorigen, und von zwanzig Fehlschlägen blieb einer sichtbar.
+    func setColorTag(for paths: [URL], tag: ColorTag?) async {
+        guard !paths.isEmpty else { return }
+        let farbe = tag?.color
+        var fehler: [TagFehler] = []
+
+        for (ordner, dateien) in Dictionary(grouping: paths, by: { $0.deletingLastPathComponent() }) {
+            let zugriff = PermissionCenter.shared.beginAccess(to: ordner)
+            let gruppenFehler = await Task.detached(priority: .userInitiated) {
+                Self.schreibe(farbe, auf: dateien, inOrdner: ordner, zugriff: zugriff)
+            }.value
+            zugriff?.stop()
+
+            let gescheitert = Set(gruppenFehler.map(\.datei))
+            for datei in dateien where !gescheitert.contains(datei) {
+                TagIndex.shared.note(farbe, for: datei)
+            }
+            fehler += gruppenFehler
+        }
+
+        melde(fehler, versucht: paths.count)
+    }
+
+    /// Was auf der Platte passiert — und sonst nichts. Ohne Bindung an den
+    /// Hauptablauf, damit derselbe Code im Vordergrund wie im Hintergrund läuft.
+    ///
+    /// `zugriff` ist der aufgelöste Ordner aus dem Lesezeichen. Liegt einer vor,
+    /// muss die Datei darunter angesprochen werden, sonst greift die Erlaubnis nicht.
+    private nonisolated static func schreibe(
+        _ farbe: ColorTag.TagColor?,
+        auf dateien: [URL],
+        inOrdner ordner: URL,
+        zugriff: ActiveAccess?
+    ) -> [TagFehler] {
+        let wurzel = zugriff?.url ?? ordner
+        var fehler: [TagFehler] = []
+        for datei in dateien {
+            do {
+                try FinderTagService.setColorTag(
+                    farbe,
+                    for: wurzel.appendingPathComponent(datei.lastPathComponent)
+                )
+            } catch {
+                fehler.append(TagFehler(datei: datei, grund: error.localizedDescription))
+            }
+        }
+        return fehler
+    }
+
+    /// Eine Meldung für den ganzen Durchgang. Bei mehreren Fehlschlägen zählt
+    /// sie sie und nennt den ersten beim Namen — sonst weiss niemand, ob eine
+    /// Datei klemmte oder alle.
+    private func melde(_ fehler: [TagFehler], versucht: Int) {
+        guard let erster = fehler.first else {
             lastTagError = nil
-        } catch {
-            lastTagError = "\(path.lastPathComponent) liess sich nicht markieren: "
-                + error.localizedDescription
+            return
+        }
+        if fehler.count == 1 {
+            lastTagError = "\(erster.datei.lastPathComponent) liess sich nicht markieren: "
+                + erster.grund
+        } else {
+            lastTagError = "\(fehler.count) von \(versucht) Dateien liessen sich nicht markieren. "
+                + "Zuerst \(erster.datei.lastPathComponent): \(erster.grund)"
         }
     }
 

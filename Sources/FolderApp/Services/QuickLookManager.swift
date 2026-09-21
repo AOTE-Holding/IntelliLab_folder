@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 @preconcurrency import Quartz
 @preconcurrency import QuickLookThumbnailing
 
@@ -51,7 +52,7 @@ private struct PreparedQuickLookSession {
 
 /// Manager for Quick Look preview functionality
 @MainActor
-class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
+class QuickLookManager: NSObject, ObservableObject, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     static let shared = QuickLookManager()
     private static let folderEntryPreviewRequest = Notification.Name("com.intellilab.folder.quicklook.preview-entry")
     private static let finderPreviewContentSize = NSSize(width: 1_040, height: 780)
@@ -60,6 +61,9 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
     private static let standardPreviewHeightKey = "quickLook.standardPreviewHeight"
 
     private var previewItems: [ManagedQuickLookItem] = []
+    /// The browser observes this value so its visible selection always follows
+    /// the item currently shown by Quick Look, including native file previews.
+    @Published private(set) var selectedPreviewSourceURL: URL?
     private var generatedPreviewDirectory: URL?
     private var folderHydrationTask: Task<Void, Never>?
     private var previewGeneration = UUID()
@@ -74,6 +78,11 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
     private var priorityPrewarmTask: Task<Void, Never>?
     private var prewarmDirectory: URL?
     private var prewarmedURLs: Set<URL> = []
+    /// Fresh, path-unique copies for files that were replaced in place. macOS
+    /// may keep a native Quick Look result for the original path even when the
+    /// file's metadata deliberately remains unchanged.
+    private var refreshedPreviewURLs: [URL: URL] = [:]
+    private var previewRefreshGenerations: [URL: UUID] = [:]
     private var standardPreviewContentSize: NSSize
     private var folderPreviewSessionID: String?
     private var previewPanelWasMovedByUser = false
@@ -102,16 +111,14 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
         )
     }
 
-    /// Toggle Quick Look preview panel
+    /// Present Quick Look preview panel. A visible preview stays active until
+    /// the user explicitly closes it (for example with Escape).
     func togglePreview(for items: [FileSystemItem], selectedIndex: Int = 0) {
         guard !items.isEmpty else { return }
 
         if let panel = QLPreviewPanel.shared() {
             if panel.isVisible {
-                previewGeneration = UUID()
-                folderHydrationTask?.cancel()
-                folderHydrationTask = nil
-                panel.orderOut(nil)
+                panel.makeKeyAndOrderFront(nil)
             } else {
                 removeGeneratedPreviews()
                 let requestedIndex = Self.clampedPreviewIndex(selectedIndex, itemCount: items.count)
@@ -121,6 +128,7 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
                 previewItems = prepared.items
                 generatedPreviewDirectory = prepared.generatedDirectory
                 currentIndex = requestedIndex
+                selectedPreviewSourceURL = previewItems[requestedIndex].sourceURL
                 scrollAccumulator = 0
                 lastScrollDirection = 0
                 lastScrollNavigationTime = 0
@@ -150,6 +158,7 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
     func showPreview(for item: FileSystemItem) {
         selectionDidChange = nil
         navigationTargetForKeyCode = nil
+        selectedPreviewSourceURL = nil
         folderPreviewSessionID = nil
         togglePreview(for: [item], selectedIndex: 0)
     }
@@ -233,6 +242,66 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
         prewarmedURLs.formUnion(warmed)
     }
 
+    /// A file was replaced at the same path (for example by image rotation).
+    /// Prepare a distinct Quick Look source so the system cannot return a
+    /// stale preview cached for that original path.
+    func refreshPreview(for url: URL) {
+        let normalizedURL = url.standardizedFileURL
+        prewarmedURLs.remove(normalizedURL)
+
+        let generation = UUID()
+        previewRefreshGenerations[normalizedURL] = generation
+        let access = PermissionCenter.shared.beginAccess(to: normalizedURL)
+        let readableURL = access?.url ?? normalizedURL
+
+        Task { [weak self] in
+            defer { access?.stop() }
+            let previewURL = await Task.detached(priority: .userInitiated) {
+                Self.createFreshPreviewCopy(for: readableURL)
+            }.value
+
+            guard let self,
+                  !Task.isCancelled,
+                  self.previewRefreshGenerations[normalizedURL] == generation,
+                  let previewURL else { return }
+
+            if let previous = self.refreshedPreviewURLs[normalizedURL] {
+                try? FileManager.default.removeItem(at: previous)
+            }
+            self.refreshedPreviewURLs[normalizedURL] = previewURL
+
+            guard let panel = QLPreviewPanel.shared(),
+                  panel.isVisible,
+                  self.previewItems.indices.contains(self.currentIndex),
+                  self.previewItems[self.currentIndex].sourceURL.standardizedFileURL == normalizedURL else { return }
+
+            let current = self.previewItems[self.currentIndex]
+            self.previewItems[self.currentIndex] = ManagedQuickLookItem(
+                sourceURL: current.sourceURL,
+                previewURL: previewURL,
+                title: current.previewItemTitle ?? current.sourceURL.lastPathComponent,
+                isFolder: false
+            )
+            panel.reloadData()
+            panel.currentPreviewItemIndex = self.currentIndex
+        }
+    }
+
+    nonisolated private static func createFreshPreviewCopy(for source: URL) -> URL? {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Folder-QuickLook-Refresh", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let ext = source.pathExtension
+            let name = "\(UUID().uuidString)\(ext.isEmpty ? "" : ".\(ext)")"
+            let destination = directory.appendingPathComponent(name)
+            try FileManager.default.copyItem(at: source, to: destination)
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
     var isPreviewVisible: Bool {
         QLPreviewPanel.shared()?.isVisible == true
     }
@@ -259,7 +328,11 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
 
         if let target = navigationTargetForKeyCode?(keyCode),
            previewItems.indices.contains(target) {
-            selectPreview(at: target, in: panel, notifySelection: false)
+            // Keep the browser's visible selection on the same item as the
+            // panel. This must also run for ordinary files: a folder preview
+            // uses a generated document, whereas a file uses its native
+            // Quick Look item, but both represent one browser selection.
+            selectPreview(at: target, in: panel, notifySelection: true)
             return true
         }
 
@@ -322,6 +395,9 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
                     previewSessionID: folderPreviewSessionID,
                     appearance: previewAppearance
                 )) ?? item.path
+            } else if let refreshedURL = refreshedPreviewURLs[item.path.standardizedFileURL],
+                      FileManager.default.fileExists(atPath: refreshedURL.path) {
+                previewURL = refreshedURL
             } else if let generatedDirectory,
                       let textPreview = FolderQuickLookPreview.createTextDocument(
                         for: item.path,
@@ -504,6 +580,7 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
         folderHydrationTask?.cancel()
         folderHydrationTask = nil
         currentIndex = index
+        selectedPreviewSourceURL = previewItems[index].sourceURL
         updatePreviewContentSize(in: panel, for: previewItems[index])
         panel.currentPreviewItemIndex = index
         if notifySelection {
@@ -670,6 +747,7 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
             folderHydrationTask = nil
             selectionDidChange = nil
             navigationTargetForKeyCode = nil
+            selectedPreviewSourceURL = nil
             folderPreviewSessionID = nil
             previewPanelWasMovedByUser = false
             automaticallyPositionedPreviewFrame = nil
@@ -783,6 +861,7 @@ class QuickLookManager: NSObject, QLPreviewPanelDataSource, QLPreviewPanelDelega
         previewItems = prepared.items
         generatedPreviewDirectory = prepared.generatedDirectory
         currentIndex = 0
+        selectedPreviewSourceURL = entry.path
         updatePreviewContentSize(in: panel, for: previewItems[0])
         panel.reloadData()
         panel.currentPreviewItemIndex = 0

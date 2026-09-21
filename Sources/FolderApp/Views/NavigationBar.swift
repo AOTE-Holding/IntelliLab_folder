@@ -341,11 +341,18 @@ struct NavigationBar: View {
 
             // Refresh button
             Button(action: { viewModel.refresh() }) {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 16))
+                if viewModel.isRefreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 16, height: 16)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 16))
+                }
             }
             .buttonStyle(FolderChromeButtonStyle())
-            .help("Refresh")
+            .disabled(viewModel.isRefreshing)
+            .help(viewModel.isRefreshing ? "Refreshing…" : "Refresh")
             .accessibilityLabel("Refresh folder")
         }
         .focusScope(focusNamespace)
@@ -610,6 +617,7 @@ private struct BreadcrumbInteractionHandler: NSViewRepresentable {
         var onDragExited: () -> Void = {}
         var onDrop: ([URL], Bool) -> Void = { _, _ in }
         private var isHovering = false
+        private var pendingSingleClick: DispatchWorkItem?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -627,16 +635,26 @@ private struct BreadcrumbInteractionHandler: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             switch event.clickCount {
             case 1:
-                // Commit the click only after the pointer is released. This
-                // keeps the breadcrumb's AppKit view alive for the full click
-                // and makes every ancestor segment (Desktop, ylli, …)
-                // navigate deterministically. Do not defer through a run-loop
-                // queue: an enclosing horizontal scroll view may be tracking
-                // at that moment and drop the delayed callback.
-                onSingleClick()
+                // AppKit reports the first half of a double-click as a normal
+                // single click. Hold navigation for 0.2 seconds so a second
+                // click can reliably turn into Copy.
+                pendingSingleClick?.cancel()
+                let action = DispatchWorkItem { [weak self] in
+                    self?.onSingleClick()
+                    self?.pendingSingleClick = nil
+                }
+                pendingSingleClick = action
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + 0.2,
+                    execute: action
+                )
             case 2:
+                pendingSingleClick?.cancel()
+                pendingSingleClick = nil
                 onDoubleClick()
             case 3:
+                pendingSingleClick?.cancel()
+                pendingSingleClick = nil
                 onTripleClick()
             default:
                 break

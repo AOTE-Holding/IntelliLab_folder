@@ -16,6 +16,8 @@ class FileExplorerViewModel: ObservableObject {
     @Published var currentPath: URL
     @Published var items: [FileSystemItem] = []
     @Published var isLoading = false
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var lastRefreshDate: Date?
     @Published var errorMessage: String?
     /// True only when the last directory read failed because macOS denied
     /// access. Other failures (an ejected drive, offline share, etc.) must
@@ -28,6 +30,7 @@ class FileExplorerViewModel: ObservableObject {
     @Published var folderSizes: [URL: Int64] = [:] // Cache folder sizes
     @Published var renamingItem: UUID? // Track which item is being renamed
     @Published var renameText: String = "" // Current text in rename field
+    private var pendingRenameURL: URL?
     @Published var isProcessing = false // Background file operation in progress
     /// Wie viele Spalten das Icon-Gitter gerade wirklich hat. Wird von der
     /// Gitteransicht gemessen und gemeldet — Pfeil hoch/runter rechnet damit.
@@ -122,10 +125,15 @@ class FileExplorerViewModel: ObservableObject {
             defer { access?.stop() }
             let readablePath = access?.url ?? requestedPath
             let showHidden = settingsManager.settings.showHiddenFiles
+            let ignoreDSStoreFiles = settingsManager.settings.ignoreDSStoreFiles
             let service = fileSystemService
             let contents = try await Task.detached(priority: .userInitiated) {
                 try Task.checkCancellation()
-                return try service.contentsOfDirectory(at: readablePath, showHidden: showHidden)
+                return try service.contentsOfDirectory(
+                    at: readablePath,
+                    showHidden: showHidden,
+                    ignoreDSStoreFiles: ignoreDSStoreFiles
+                )
             }.value
             guard generation == loadGeneration, requestedPath == currentPath else { return }
 
@@ -158,6 +166,11 @@ class FileExplorerViewModel: ObservableObject {
             let sortedContents = sortItems(identityStableContents)
             if self.items != sortedContents {
                 self.items = sortedContents
+            }
+            if let pendingRenameURL,
+               let newFolder = self.items.first(where: { $0.path.standardizedFileURL == pendingRenameURL }) {
+                self.pendingRenameURL = nil
+                startRenaming(newFolder)
             }
             self.hideLoadingIndicator()
             self.requiresPermission = false
@@ -327,6 +340,8 @@ class FileExplorerViewModel: ObservableObject {
     /// any in-flight load invalidated before SwiftUI can render the new path.
     private func prepareForNavigation(to url: URL) {
         loadGeneration += 1
+        pendingRenameURL = nil
+        lastRefreshDate = nil
         scheduleLoadingIndicator()
         errorMessage = nil
         requiresPermission = false
@@ -477,8 +492,16 @@ class FileExplorerViewModel: ObservableObject {
     // MARK: - Refresh
 
     func refresh() {
+        guard !isRefreshing else { return }
+        let path = currentPath
+        isRefreshing = true
+        lastRefreshDate = nil
         Task {
             await loadContents()
+            isRefreshing = false
+            if currentPath == path && errorMessage == nil {
+                lastRefreshDate = Date()
+            }
         }
     }
 
@@ -568,22 +591,36 @@ class FileExplorerViewModel: ObservableObject {
     // MARK: - File Operations
 
     func createNewFolder(named name: String, autoRename: Bool = false) {
+        guard FileOperationPolicy.isEnabled, FileDropValidation.canWrite(to: currentPath) else { return }
+        let parent = currentPath.standardizedFileURL
         FileOperationCoordinator.shared.createFolder(in: currentPath, named: name) { [weak self] newURL in
-            guard autoRename, let self, let newURL else { return }
+            guard autoRename, let self, let newURL,
+                  self.currentPath.standardizedFileURL == parent else { return }
+            self.pendingRenameURL = newURL.standardizedFileURL
             Task {
                 await self.loadContents()
-                if let newFolder = self.items.first(where: { $0.path.standardizedFileURL == newURL.standardizedFileURL }) {
-                    self.startRenaming(newFolder)
-                }
             }
         }
     }
 
     func renameItem(_ item: FileSystemItem, to newName: String) {
-        FileOperationCoordinator.shared.rename(item.path, to: newName)
+        let parent = currentPath.standardizedFileURL
+        FileOperationCoordinator.shared.rename(item.path, to: newName) { [weak self] destination in
+            guard let self, let destination,
+                  self.currentPath.standardizedFileURL == parent else { return }
+            Task {
+                await self.loadContents()
+                if let renamed = self.items.first(where: { $0.path.standardizedFileURL == destination.standardizedFileURL }) {
+                    self.selectOnly(renamed)
+                }
+            }
+        }
     }
 
     func startRenaming(_ item: FileSystemItem) {
+        guard FileOperationPolicy.isEnabled,
+              FileDropValidation.canWrite(to: item.path.deletingLastPathComponent()) else { return }
+        selectOnly(item)
         renamingItem = item.id
         renameText = item.name
     }
@@ -591,7 +628,6 @@ class FileExplorerViewModel: ObservableObject {
     func commitRename() {
         guard let itemId = renamingItem,
               let item = items.first(where: { $0.id == itemId }),
-              !renameText.isEmpty,
               renameText != item.name else {
             cancelRename()
             return
@@ -622,22 +658,55 @@ class FileExplorerViewModel: ObservableObject {
     /// Die eine Stelle, an der ein Tag gesetzt wird — das Kontextmenü und das
     /// Fallenlassen einer Farbe aus der Sidebar gehen beide hier durch. Zwei
     /// Wege, die dasselbe tun, laufen sonst früher oder später auseinander.
-    func applyColorTag(_ color: ColorTag.TagColor?, to items: [FileSystemItem]) {
+    func applyColorTag(
+        _ color: ColorTag.TagColor?,
+        to items: [FileSystemItem],
+        onCompleted: @escaping @MainActor () -> Void = {}
+    ) {
         guard !items.isEmpty else { return }
 
         let tag = color.map { ColorTag(color: $0, name: $0.displayName) }
-        for item in items {
-            SidebarManager.shared.setColorTag(for: item.path, tag: tag)
-        }
+        let paths = items.map(\.path)
 
-        // Die Kacheln tragen die Farbe aus dem letzten Einlesen. Ohne das
-        // Nachladen bliebe der Punkt bis zur nächsten Navigation stehen.
-        refresh()
+        // Das Setzen eines Finder-Tags liest, schreibt und prüft Metadaten.
+        // Bei einer Mehrfachauswahl darf diese Arbeit weder die Ereignis- noch
+        // die Zeichenverarbeitung blockieren. Der SidebarManager bündelt die
+        // Dateien nach Ordnern, erledigt die Plattenarbeit im Hintergrund und
+        // liefert eine einzige Fehlerzusammenfassung zurück.
+        Task { [weak self] in
+            await SidebarManager.shared.setColorTag(for: paths, tag: tag)
 
-        // Steht die Tag-Ansicht offen, muss sie neu aufgebaut werden: eine
-        // Datei, der man die Farbe genommen hat, gehört nicht mehr hinein.
-        if let aktiveFarbe = tagFilterMode {
-            showFilesWithTag(aktiveFarbe)
+            guard let self, !Task.isCancelled else { return }
+
+            // Die Kacheln tragen die Farbe aus dem letzten Einlesen. Ein
+            // einziges Nachladen nach dem gesamten Durchgang hält die Anzeige
+            // konsistent, ohne sie für jede Datei erneut aufzubauen.
+            self.refresh()
+
+            // Steht die Tag-Ansicht offen, muss sie neu aufgebaut werden: eine
+            // Datei, der man die Farbe genommen hat, gehört nicht mehr hinein.
+            if let aktiveFarbe = self.tagFilterMode {
+                self.showFilesWithTag(aktiveFarbe)
+
+                // Der letzte Eintrag ist aus der geöffneten Tag-Ansicht
+                // verschwunden. Eine leere Sonderansicht hat keinen Nutzen;
+                // sie wird wie ein geschlossener Tab beendet und führt zum
+                // Desktop zurück.
+                if self.tagFilteredItems.isEmpty {
+                    self.exitTagFilterMode()
+                    let desktop = FileManager.default.urls(
+                        for: .desktopDirectory,
+                        in: .userDomainMask
+                    ).first ?? self.currentPath
+
+                    if self.currentPath.standardizedFileURL == desktop.standardizedFileURL {
+                        self.refresh()
+                    } else {
+                        self.navigate(to: desktop)
+                    }
+                }
+            }
+            onCompleted()
         }
     }
 

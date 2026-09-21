@@ -41,6 +41,7 @@ struct PermissionsCenterView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+
             }
             .padding(20)
         }
@@ -116,8 +117,15 @@ struct PermissionsCenterView: View {
             Image(systemName: entry.symbolName)
                 .foregroundColor(.accentColor)
                 .frame(width: 20)
-            Text(entry.title)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.title)
+                if entry.status == .notRequested && center.hasFullDiskAccess {
+                    Text("Available through Full Disk Access; no Folder bookmark saved.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
             statusBadge(entry.status)
 
             switch entry.status {
@@ -229,7 +237,7 @@ struct PermissionsCenterView: View {
                      : "Enable Folder in macOS System Settings, then check the permission again here.")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Text("This status is based on an actual protected-location access check, not a confirmation-only setting.")
+                Text("Folder checks protected locations again whenever it returns from System Settings.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

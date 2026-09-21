@@ -91,18 +91,19 @@ private func selectedIndex(_ model: SearchViewModel) -> Int? {
 
 /// Die Spaltenzahl folgt derselben Regel, nach der SwiftUI `.adaptive` auflöst.
 @Test func gridColumnsFollowTheAdaptiveLayoutRule() {
-    let minimum = GridColumnMath.itemMinimum(iconSize: 64)   // 104
-    #expect(minimum == 104)
+    let minimum = GridColumnMath.itemMinimum(iconSize: 64)   // 120
+    #expect(minimum == 120)
 
-    // 800 - 32 Innenabstand = 768 nutzbar; (768 + 16) / (104 + 16) = 6,53 → 6 Spalten
-    #expect(GridColumnMath.columns(availableWidth: 800, itemMinimum: minimum) == 6)
+    // 800 - 32 Innenabstand = 768 nutzbar; (768 + 16) / (120 + 16) = 5,76 → 5 Spalten.
+    // Die 16 Punkte Zellrand halten Auswahlrahmen zwischen den Kacheln frei.
+    #expect(GridColumnMath.columns(availableWidth: 800, itemMinimum: minimum) == 5)
 
     // Grössere Symbole, dieselbe Breite: weniger Spalten
     #expect(
         GridColumnMath.columns(
             availableWidth: 800,
             itemMinimum: GridColumnMath.itemMinimum(iconSize: 128)
-        ) == 4
+        ) == 3
     )
 }
 

@@ -183,6 +183,7 @@ class PermissionCenter: ObservableObject {
     private var folderStatusGeneration = 0
     private var fullDiskAccessGeneration = 0
     private var terminalStatusGeneration = 0
+    private var applicationActivationObserver: NSObjectProtocol?
 
     private let volumeManager = VolumeManager.shared
 
@@ -200,6 +201,19 @@ class PermissionCenter: ObservableObject {
         refreshFolderStatus()
         detectFullDiskAccess()
         refreshTerminalStatuses()
+
+        // System Settings changes Full Disk Access while Folder is inactive.
+        // Always read the live TCC-protected locations when it becomes active
+        // again instead of leaving the earlier denial on screen.
+        applicationActivationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.detectFullDiskAccess()
+            }
+        }
     }
 
     // MARK: - Standard folders
@@ -255,7 +269,6 @@ class PermissionCenter: ObservableObject {
 
     func refreshFolderStatus() {
         let bookmarks = loadStandardBookmarks()
-        let fullDiskAccessGranted = hasFullDiskAccess
         let probes = standardFolderList().map { entry in
             StandardFolderProbe(
                 id: entry.id,
@@ -271,7 +284,7 @@ class PermissionCenter: ObservableObject {
                 id: probe.id,
                 title: probe.title,
                 url: probe.url,
-                status: fullDiskAccessGranted || probe.bookmarkData != nil ? .allowed : .notRequested
+                status: probe.bookmarkData != nil ? .allowed : .notRequested
             )
         }
 
@@ -279,29 +292,14 @@ class PermissionCenter: ObservableObject {
         let generation = folderStatusGeneration
         Task { [weak self] in
             let statuses = await Task.detached(priority: .utility) {
-                probes.map { Self.probeStandardFolder($0, fullDiskAccessGranted: fullDiskAccessGranted) }
+                probes.map { Self.probeStandardFolder($0) }
             }.value
             guard let self, generation == folderStatusGeneration else { return }
             standardFolderAccess = statuses
         }
     }
 
-    nonisolated private static func probeStandardFolder(
-        _ probe: StandardFolderProbe,
-        fullDiskAccessGranted: Bool
-    ) -> StandardFolderAccess {
-        // Full Disk Access is an explicit macOS grant. Do not ask the user to
-        // select Desktop/Documents/Downloads again when it already makes the
-        // standard root directly usable.
-        if fullDiskAccessGranted {
-            return StandardFolderAccess(
-                id: probe.id,
-                title: probe.title,
-                url: probe.url,
-                status: .allowed
-            )
-        }
-
+    nonisolated private static func probeStandardFolder(_ probe: StandardFolderProbe) -> StandardFolderAccess {
         guard let bookmarkData = probe.bookmarkData else {
             return StandardFolderAccess(
                 id: probe.id,
@@ -551,22 +549,38 @@ class PermissionCenter: ObservableObject {
 
     func detectFullDiskAccess() {
         let home = Self.loginUserHomeDirectory(fileManager: fileManager, userName: NSUserName())
-        let protectedPaths = [
-            home.appendingPathComponent("Library/Messages").path,
-            home.appendingPathComponent("Library/Safari").path,
-            home.appendingPathComponent("Library/Mail").path,
-            home.appendingPathComponent("Library/Application Support/MobileSync").path
+        let protectedLocations = [
+            home.appendingPathComponent("Library/Messages", isDirectory: true),
+            home.appendingPathComponent("Library/Mail", isDirectory: true),
+            home.appendingPathComponent("Library/Safari", isDirectory: true),
+            home.appendingPathComponent("Library/Application Support/MobileSync", isDirectory: true)
         ]
         fullDiskAccessGeneration += 1
         let generation = fullDiskAccessGeneration
         Task { [weak self] in
             let available = await Task.detached(priority: .utility) {
-                protectedPaths.contains { FileManager.default.isReadableFile(atPath: $0) }
+                protectedLocations.contains { Self.canEnumerateProtectedLocation($0) }
             }.value
             guard let self, generation == fullDiskAccessGeneration else { return }
             hasFullDiskAccess = available
             defaults.set(available, forKey: fullDiskAccessConfirmedKey)
             refreshFolderStatus()
+        }
+    }
+
+    /// Full Disk Access is controlled by TCC, not by file metadata. A path can
+    /// exist while TCC still rejects a directory read, and some protected apps
+    /// may not have created their directory at all. Enumerating an existing
+    /// protected location is the operation Folder needs to perform in practice.
+    nonisolated static func canEnumerateProtectedLocation(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              isDirectory.boolValue else { return false }
+        do {
+            _ = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -901,25 +915,38 @@ class PermissionCenter: ObservableObject {
 
     // MARK: - Reset
 
-    /// Clear all stored access state (used by onboarding "Skip" and a debug reset).
-    func resetAll() {
+    /// Clears Folder's persisted permission records without changing the
+    /// onboarding state. macOS-owned switches such as Full Disk Access and
+    /// Automation remain under System Settings' control.
+    func resetStoredPermissions() {
+        for folder in userFolders {
+            if let data = folder.bookmarkData,
+               let resolved = resolve(url: folder.url, bookmarkData: data) {
+                resolved.stopAccessingSecurityScopedResource()
+            }
+        }
         userFolders = []
-        saveUserFolders()
+        defaults.removeObject(forKey: userFoldersKey)
         defaults.removeObject(forKey: standardBookmarksKey)
-        defaults.removeObject(forKey: onboardingSeenKey)
-        defaults.removeObject(forKey: onboardingStepKey)
         defaults.removeObject(forKey: fullDiskAccessConfirmedKey)
         defaults.removeObject(forKey: fullDiskAccessSettingsOpenedKey)
         defaults.removeObject(forKey: terminalRequestedKey)
         defaults.removeObject(forKey: iTermRequestedKey)
-        hasSeenOnboarding = false
-        onboardingStep = 0
-        hasFullDiskAccess = false
         fullDiskAccessSettingsOpened = false
+        lastError = nil
         refreshFolderStatus()
         detectFullDiskAccess()
         refreshTerminalStatuses()
         reloadVolumes()
+    }
+
+    /// Clear all stored access state for the dedicated first-run/debug reset.
+    func resetAll() {
+        resetStoredPermissions()
+        defaults.removeObject(forKey: onboardingSeenKey)
+        defaults.removeObject(forKey: onboardingStepKey)
+        hasSeenOnboarding = false
+        onboardingStep = 0
     }
 }
 

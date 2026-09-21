@@ -10,7 +10,7 @@ import SwiftUI
 
 // Create app delegate
 @MainActor
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var mainWindowController: NSWindowController?
     var settingsWindowController: NSWindowController?
     var onboardingWindowController: NSWindowController?
@@ -146,16 +146,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Öffnet die Einstellungen direkt im Bereich Berechtigungen.
-    ///
-    /// Vorher hing dieser Menüpunkt an derselben Funktion wie „Settings…" und
-    /// landete deshalb immer im allgemeinen Bereich.
-    @MainActor @objc func showPermissions() {
-        SettingsNavigation.shared.selectedTab = .permissions
-        showSettings()
+    @MainActor @objc func showSettings() {
+        // Der explizite Settings-Befehl beginnt immer im General-Tab. Eine
+        // innerhalb des offenen Fensters gewählte Ansicht bleibt erhalten,
+        // aber ein späteres erneutes Öffnen zeigt wieder die Einstellungen.
+        SettingsNavigation.shared.selectedTab = .general
+        presentSettingsWindow()
     }
 
-    @MainActor @objc func showSettings() {
+    @MainActor private func presentSettingsWindow() {
         guard PermissionCenter.shared.hasSeenOnboarding else {
             showOnboarding()
             return
@@ -320,6 +319,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .createFolderTab, object: nil)
     }
 
+    @objc func createNewFolder() {
+        guard NSApp.keyWindow === mainWindowController?.window else { return }
+        NotificationCenter.default.post(name: .createNewFolder, object: nil)
+    }
+
     @objc func closeFolderTab() {
         if SettingsManager.shared.settings.tabsEnabled ?? false {
             NotificationCenter.default.post(name: .closeFolderTab, object: nil)
@@ -328,7 +332,59 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc func editCut(_ sender: Any?) { performEdit(.cut, sender: sender) }
+    @objc func editCopy(_ sender: Any?) { performEdit(.copy, sender: sender) }
+    @objc func editPaste(_ sender: Any?) { performEdit(.paste, sender: sender) }
+    @objc func editSelectAll(_ sender: Any?) { performEdit(.selectAll, sender: sender) }
+    @objc func editUndo(_ sender: Any?) { performEdit(.undo, sender: sender) }
+    @objc func editRedo(_ sender: Any?) { performEdit(.redo, sender: sender) }
+
+    private func editCommand(for action: Selector?) -> BrowserEditCommand? {
+        switch action {
+        case #selector(editCut(_:)): return .cut
+        case #selector(editCopy(_:)): return .copy
+        case #selector(editPaste(_:)): return .paste
+        case #selector(editSelectAll(_:)): return .selectAll
+        case #selector(editUndo(_:)): return .undo
+        case #selector(editRedo(_:)): return .redo
+        default: return nil
+        }
+    }
+
+    private func performEdit(_ command: BrowserEditCommand, sender: Any?) {
+        if let editor = NSApp.keyWindow?.firstResponder as? NSText {
+            switch command {
+            case .cut: _ = NSApp.sendAction(#selector(NSText.cut(_:)), to: editor, from: sender)
+            case .copy: _ = NSApp.sendAction(#selector(NSText.copy(_:)), to: editor, from: sender)
+            case .paste: _ = NSApp.sendAction(#selector(NSText.paste(_:)), to: editor, from: sender)
+            case .selectAll: _ = NSApp.sendAction(#selector(NSText.selectAll(_:)), to: editor, from: sender)
+            case .undo: editor.undoManager?.undo()
+            case .redo: editor.undoManager?.redo()
+            }
+        } else if NSApp.keyWindow === mainWindowController?.window {
+            BrowserEditCommands.shared.perform(command)
+        }
+    }
+
+    private func canEditText(_ command: BrowserEditCommand, in editor: NSText) -> Bool {
+        switch command {
+        case .cut: return editor.isEditable && editor.selectedRange.length > 0
+        case .copy: return editor.selectedRange.length > 0
+        case .paste: return editor.isEditable && NSPasteboard.general.string(forType: .string) != nil
+        case .selectAll: return !editor.string.isEmpty
+        case .undo: return editor.undoManager?.canUndo ?? false
+        case .redo: return editor.undoManager?.canRedo ?? false
+        }
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if let command = editCommand(for: menuItem.action) {
+            if let editor = NSApp.keyWindow?.firstResponder as? NSText {
+                return canEditText(command, in: editor)
+            }
+            return NSApp.keyWindow === mainWindowController?.window
+                && BrowserEditCommands.shared.canPerform(command)
+        }
         if menuItem.action == #selector(createFolderTab) {
             return SettingsManager.shared.settings.tabsEnabled ?? false
         }
@@ -336,6 +392,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setupMenu() {
+        NSApp.mainMenu = buildMenu()
+    }
+
+    func buildMenu() -> NSMenu {
         let mainMenu = NSMenu()
 
         // App menu
@@ -344,7 +404,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         appMenuItem.submenu = appMenu
 
         appMenu.addItem(withTitle: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
-        appMenu.addItem(withTitle: "Permissions...", action: #selector(showPermissions), keyEquivalent: "")
         appMenu.addItem(withTitle: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Folder", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -356,7 +415,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let fileMenuItem = NSMenuItem()
         fileMenuItem.submenu = fileMenu
 
-        fileMenu.addItem(withTitle: "New Folder", action: nil, keyEquivalent: "n")
+        let newFolderItem = fileMenu.addItem(withTitle: "New Folder", action: #selector(createNewFolder), keyEquivalent: "n")
+        newFolderItem.target = self
         fileMenu.addItem(withTitle: "New Tab", action: #selector(createFolderTab), keyEquivalent: "t")
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Close", action: #selector(closeFolderTab), keyEquivalent: "w")
@@ -368,14 +428,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let editMenuItem = NSMenuItem()
         editMenuItem.submenu = editMenu
 
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let undoItem = editMenu.addItem(withTitle: "Undo", action: #selector(editUndo(_:)), keyEquivalent: "z")
+        undoItem.target = self
+        let redoItem = editMenu.addItem(withTitle: "Redo", action: #selector(editRedo(_:)), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        redoItem.target = self
+        editMenu.addItem(NSMenuItem.separator())
+        for (title, action, key) in [
+            ("Cut", #selector(editCut(_:)), "x"),
+            ("Copy", #selector(editCopy(_:)), "c"),
+            ("Paste", #selector(editPaste(_:)), "v"),
+            ("Select All", #selector(editSelectAll(_:)), "a")
+        ] {
+            let item = editMenu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.target = self
+        }
 
         mainMenu.addItem(editMenuItem)
 
-        NSApp.mainMenu = mainMenu
+        return mainMenu
     }
 
 }

@@ -160,8 +160,7 @@ enum FolderQuickLookPreview {
             .isDirectoryKey,
             .isSymbolicLinkKey,
             .fileSizeKey,
-            .contentModificationDateKey,
-            .contentTypeKey
+            .contentModificationDateKey
         ]
         let urls = try fileManager.contentsOfDirectory(
             at: folderURL,
@@ -188,7 +187,9 @@ enum FolderQuickLookPreview {
             } else if isDirectory {
                 kind = "Folder"
             } else {
-                kind = values.contentType?.localizedDescription ?? "File"
+                // Reading contentType as part of the resource-value batch can
+                // fail when Launch Services has no kind for this filename.
+                kind = UTType(filenameExtension: url.pathExtension)?.localizedDescription ?? "File"
             }
 
             candidates.append((

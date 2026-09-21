@@ -37,6 +37,9 @@ if mv "${STAGING_APP}" "${INSTALL_APP}"; then
     if ! pluginkit -a "${QUICKLOOK_APPEX}"; then
       echo "Warning: Quick Look extension registration will be retried when Folder opens." >&2
     fi
+    if ! pluginkit -e use -i "com.intellilab.folder.quicklookpreview"; then
+      echo "Warning: Quick Look extension activation will be retried when Folder opens." >&2
+    fi
   fi
   trap - EXIT
   echo "Installed ${INSTALL_APP}"

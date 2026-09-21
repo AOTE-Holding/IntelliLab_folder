@@ -29,7 +29,13 @@ else
 fi
 
 echo "Building ${APP_NAME} ${APP_VERSION} (${BUILD_CONFIGURATION})"
-swift build -c release -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
+SWIFT_BUILD_FLAGS=()
+if [[ "${SWIFT_BUILD_DISABLE_SANDBOX:-0}" == "1" ]]; then
+  SWIFT_BUILD_FLAGS+=(--disable-sandbox)
+fi
+# Die Ersetzung mit + ist nötig: Unter bash 3.2, wie es macOS mitbringt, gilt
+# eine leere Liste bei "set -u" als nicht gesetzt und bricht den Build ab.
+swift build ${SWIFT_BUILD_FLAGS[@]+"${SWIFT_BUILD_FLAGS[@]}"} -c release -Xswiftc -warnings-as-errors -Xswiftc -strict-concurrency=complete
 
 rm -rf "${APP_BUNDLE}"
 mkdir -p "${MACOS}" "${RESOURCES}" "${QUICKLOOK_MACOS}"
@@ -75,6 +81,14 @@ ditto Resources/Info.plist.template "${PLIST}"
 chmod +x "${MACOS}/${APP_NAME}"
 SIGN_OPTIONS=(--options runtime)
 if [[ "${BUILD_CONFIGURATION}" == "release" ]]; then SIGN_OPTIONS+=(--timestamp); fi
+SIGN_REQUIREMENTS=()
+if [[ "${BUILD_CONFIGURATION}" != "release" ]]; then
+  # An ad-hoc signature normally uses the executable hash as its designated
+  # requirement. TCC then treats every local rebuild as a different app and
+  # drops Full Disk Access after an update. Keep one stable identity while
+  # developing locally; release builds retain their team-signed requirement.
+  SIGN_REQUIREMENTS=("-r=designated => identifier \"${BUNDLE_IDENTIFIER}\"")
+fi
 
 codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
   --entitlements "QuickLookExtension/FolderQuickLookPreview.entitlements" \
@@ -86,6 +100,7 @@ if [[ "${BUILD_CONFIGURATION}" != "release" ]]; then
   ENTITLEMENTS_FILE="Folder.development.entitlements"
 fi
 codesign --force --sign "${CODE_SIGN_IDENTITY}" "${SIGN_OPTIONS[@]}" \
+  "${SIGN_REQUIREMENTS[@]}" \
   --entitlements "${ENTITLEMENTS_FILE}" "${APP_BUNDLE}"
 codesign --verify --deep --strict --verbose=2 "${APP_BUNDLE}"
 

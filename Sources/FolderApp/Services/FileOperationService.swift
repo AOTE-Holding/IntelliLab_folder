@@ -65,13 +65,30 @@ struct FileOperationReport: Sendable {
     var succeeded: [FileOperationItemResult] { results.filter { $0.outcome == .succeeded } }
     var failed: [FileOperationItemResult] { results.filter { $0.outcome == .failed } }
     var skipped: [FileOperationItemResult] { results.filter { $0.outcome == .skipped } }
-    var wasCancelled: Bool { results.contains { $0.outcome == .cancelled } }
+    var cancelled: [FileOperationItemResult] { results.filter { $0.outcome == .cancelled } }
+    var wasCancelled: Bool { !cancelled.isEmpty }
     var allSucceeded: Bool { !results.isEmpty && succeeded.count == results.count }
 }
 
 struct FileRelocation: Sendable {
     let source: URL
     let destination: URL
+}
+
+/// A prepared transfer can run independently from every other selected item.
+/// Planning happens inside `FileOperationService` first so conflict decisions
+/// remain deterministic, while the actual disk I/O can proceed in parallel.
+private struct PreparedTransfer: Sendable {
+    let index: Int
+    let source: URL
+    let destination: URL
+    let kind: FileOperationKind
+    let replacesExistingItem: Bool
+}
+
+private struct ArchiveEntry: Sendable {
+    let fileURL: URL
+    let path: String
 }
 
 enum FileOperationError: LocalizedError, Sendable {
@@ -146,77 +163,80 @@ actor FileOperationService {
         progress: ProgressHandler? = nil
     ) async -> FileOperationReport {
         precondition(kind == .copy || kind == .move)
-        var results: [FileOperationItemResult] = []
+        guard !sources.isEmpty else { return FileOperationReport(kind: kind, results: []) }
+
+        var prepared: [PreparedTransfer] = []
+        var orderedResults = Array<FileOperationItemResult?>(repeating: nil, count: sources.count)
+        var reservedDestinations = Set<String>()
 
         for (index, source) in sources.enumerated() {
             if Task.isCancelled || conflictResolution == .cancel {
-                results.append(contentsOf: sources[index...].map {
-                    result(source: $0, outcome: .cancelled, message: "Operation cancelled.")
-                })
+                for remaining in index..<sources.count {
+                    orderedResults[remaining] = result(source: sources[remaining], outcome: .cancelled, message: "Operation cancelled.")
+                }
                 break
             }
 
-            await progress?(FileOperationProgress(completed: index, total: sources.count, currentItem: source))
             var destination = destinationDirectory.appendingPathComponent(source.lastPathComponent)
-
             if source.standardizedFileURL == destination.standardizedFileURL {
-                if kind == .copy {
-                    destination = uniqueURL(for: destination)
-                } else {
-                    results.append(result(source: source, destination: destination, outcome: .skipped, message: "The item is already in this folder."))
+                guard kind == .copy else {
+                    orderedResults[index] = result(source: source, destination: destination, outcome: .skipped, message: "The item is already in this folder.")
                     continue
                 }
+                destination = uniqueURL(for: destination, reserving: reservedDestinations)
             }
 
-            var replacedTrashURL: URL?
-            if fileManager.fileExists(atPath: destination.path) {
+            let destinationIsTaken = fileManager.fileExists(atPath: destination.path)
+                || reservedDestinations.contains(destination.standardizedFileURL.path)
+            if destinationIsTaken {
                 switch conflictResolution {
                 case .keepBoth:
-                    destination = uniqueURL(for: destination)
+                    destination = uniqueURL(for: destination, reserving: reservedDestinations)
                 case .skip:
-                    results.append(result(source: source, destination: destination, outcome: .skipped, message: "An item with this name already exists."))
+                    orderedResults[index] = result(source: source, destination: destination, outcome: .skipped, message: "An item with this name already exists.")
                     continue
                 case .cancel:
+                    orderedResults[index] = result(source: source, destination: destination, outcome: .cancelled, message: "Operation cancelled.")
                     continue
                 case .replace:
-                    do {
-                        var trashURL: NSURL?
-                        try fileManager.trashItem(at: destination, resultingItemURL: &trashURL)
-                        replacedTrashURL = trashURL as URL?
-                    } catch {
-                        results.append(result(source: source, destination: destination, outcome: .failed, message: "Could not preserve the existing item: \(error.localizedDescription)"))
-                        continue
-                    }
+                    break
                 }
             }
 
-            do {
-                if kind == .move {
-                    try fileManager.moveItem(at: source, to: destination)
-                } else {
-                    try fileManager.copyItem(at: source, to: destination)
+            reservedDestinations.insert(destination.standardizedFileURL.path)
+            prepared.append(PreparedTransfer(
+                index: index,
+                source: source,
+                destination: destination,
+                kind: kind,
+                replacesExistingItem: destinationIsTaken && conflictResolution == .replace
+            ))
+        }
+
+        var completed = orderedResults.compactMap { $0 }.count
+        await progress?(FileOperationProgress(completed: completed, total: sources.count, currentItem: prepared.first?.source))
+
+        await withTaskGroup(of: (Int, FileOperationItemResult).self) { group in
+            for transfer in prepared {
+                group.addTask {
+                    (transfer.index, Self.performPreparedTransfer(transfer))
                 }
-                results.append(result(source: source, destination: destination, outcome: .succeeded, replacedItemInTrash: replacedTrashURL))
-            } catch {
-                let originalError = error
-                if let replacedTrashURL {
-                    do {
-                        try fileManager.moveItem(at: replacedTrashURL, to: destination)
-                    } catch {
-                        results.append(result(
-                            source: source,
-                            destination: destination,
-                            outcome: .failed,
-                            message: "\(originalError.localizedDescription) The replaced item also could not be restored: \(error.localizedDescription)"
-                        ))
-                        continue
-                    }
-                }
-                results.append(result(source: source, destination: destination, outcome: .failed, message: originalError.localizedDescription))
+            }
+
+            for await (index, itemResult) in group {
+                orderedResults[index] = itemResult
+                completed += 1
+                await progress?(FileOperationProgress(
+                    completed: completed,
+                    total: sources.count,
+                    currentItem: completed == sources.count ? nil : itemResult.source
+                ))
             }
         }
 
-        await progress?(FileOperationProgress(completed: results.count, total: sources.count, currentItem: nil))
+        let results = orderedResults.enumerated().map { index, itemResult in
+            itemResult ?? result(source: sources[index], outcome: .cancelled, message: "Operation cancelled.")
+        }
         return FileOperationReport(kind: kind, results: results)
     }
 
@@ -224,24 +244,9 @@ actor FileOperationService {
         _ sources: [URL],
         progress: ProgressHandler? = nil
     ) async -> FileOperationReport {
-        var results: [FileOperationItemResult] = []
-        for (index, source) in sources.enumerated() {
-            if Task.isCancelled {
-                results.append(contentsOf: sources[index...].map {
-                    result(source: $0, outcome: .cancelled, message: "Operation cancelled.")
-                })
-                break
-            }
-            await progress?(FileOperationProgress(completed: index, total: sources.count, currentItem: source))
-            do {
-                var trashURL: NSURL?
-                try fileManager.trashItem(at: source, resultingItemURL: &trashURL)
-                results.append(result(source: source, destination: trashURL as URL?, outcome: .succeeded))
-            } catch {
-                results.append(result(source: source, outcome: .failed, message: error.localizedDescription))
-            }
+        let results = await performParallel(sources, progress: progress) { _, source in
+            Self.trashItem(source)
         }
-        await progress?(FileOperationProgress(completed: results.count, total: sources.count, currentItem: nil))
         return FileOperationReport(kind: .trash, results: results)
     }
 
@@ -310,19 +315,15 @@ actor FileOperationService {
     }
 
     func duplicate(_ sources: [URL], progress: ProgressHandler? = nil) async -> FileOperationReport {
-        var results: [FileOperationItemResult] = []
-        for (index, source) in sources.enumerated() {
-            if Task.isCancelled { break }
-            await progress?(FileOperationProgress(completed: index, total: sources.count, currentItem: source))
-            let destination = uniqueDuplicateURL(for: source)
-            do {
-                try fileManager.copyItem(at: source, to: destination)
-                results.append(result(source: source, destination: destination, outcome: .succeeded))
-            } catch {
-                results.append(result(source: source, destination: destination, outcome: .failed, message: error.localizedDescription))
-            }
+        var reservedDestinations = Set<String>()
+        let destinations = sources.map { source -> URL in
+            let destination = uniqueDuplicateURL(for: source, reserving: reservedDestinations)
+            reservedDestinations.insert(destination.standardizedFileURL.path)
+            return destination
         }
-        await progress?(FileOperationProgress(completed: results.count, total: sources.count, currentItem: nil))
+        let results = await performParallel(sources, progress: progress) { index, source in
+            Self.duplicateItem(source, to: destinations[index])
+        }
         return FileOperationReport(kind: .duplicate, results: results)
     }
 
@@ -342,32 +343,23 @@ actor FileOperationService {
         do {
             let entries = try archiveEntries(for: sources)
             try Task.checkCancellation()
-
-            do {
-                let archive = try Archive(url: temporaryURL, accessMode: .create)
-                for (index, entry) in entries.enumerated() {
-                    try Task.checkCancellation()
-                    await progress?(FileOperationProgress(
-                        completed: index,
-                        total: entries.count,
-                        currentItem: entry.fileURL
-                    ))
-
-                    let entryProgress = Progress(totalUnitCount: 1)
-                    try await withTaskCancellationHandler {
-                        try archive.addEntry(
-                            with: entry.path,
-                            fileURL: entry.fileURL,
-                            compressionMethod: .deflate,
-                            progress: entryProgress
-                        )
-                    } onCancel: {
-                        entryProgress.cancel()
-                    }
+            let archive = try Archive(url: temporaryURL, accessMode: .create)
+            for (index, entry) in entries.enumerated() {
+                try Task.checkCancellation()
+                await progress?(FileOperationProgress(completed: index, total: entries.count, currentItem: entry.fileURL))
+                let entryProgress = Progress(totalUnitCount: 1)
+                try await withTaskCancellationHandler {
+                    try archive.addEntry(
+                        with: entry.path,
+                        fileURL: entry.fileURL,
+                        compressionMethod: .deflate,
+                        progress: entryProgress
+                    )
+                } onCancel: {
+                    entryProgress.cancel()
                 }
             }
-
-            try validateArchive(at: temporaryURL, expectedPaths: Set(entries.map(\.path)))
+            try Self.validateArchive(at: temporaryURL, expectedPaths: Set(entries.map(\.path)))
             try Task.checkCancellation()
             try fileManager.moveItem(at: temporaryURL, to: destination)
             await progress?(FileOperationProgress(completed: entries.count, total: entries.count, currentItem: nil))
@@ -378,21 +370,17 @@ actor FileOperationService {
             try? fileManager.removeItem(at: temporaryURL)
             let cancelled = error is CancellationError || Task.isCancelled
             return FileOperationReport(kind: .compress, results: sources.map {
-                result(
-                    source: $0,
-                    destination: destination,
-                    outcome: cancelled ? .cancelled : .failed,
-                    message: cancelled ? "Operation cancelled." : error.localizedDescription
-                )
+                result(source: $0, destination: destination, outcome: cancelled ? .cancelled : .failed, message: cancelled ? "Operation cancelled." : error.localizedDescription)
             })
         }
     }
 
-    /// Rotation never overwrites the source. It writes a sibling temporary
-    /// file, validates that output, and only then renames it to a visible copy.
-    func rotateCopy(_ source: URL, quarterTurns: Int) async -> FileOperationReport {
+    /// Rotates the selected image in place. The encoded output is first
+    /// validated in a sibling temporary file, then atomically replaces the
+    /// original path. File metadata is copied where the volume permits it.
+    func rotate(_ source: URL, quarterTurns: Int) async -> FileOperationReport {
         do {
-            let destination = try SafeImageRotator.rotateCopy(
+            let destination = try SafeImageRotator.rotateInPlace(
                 at: source,
                 quarterTurns: quarterTurns,
                 fileManager: fileManager
@@ -417,7 +405,152 @@ actor FileOperationService {
         }
     }
 
-    private func uniqueDuplicateURL(for source: URL) -> URL {
+    private func uniqueURL(for url: URL, reserving reservedPaths: Set<String>) -> URL {
+        guard fileManager.fileExists(atPath: url.path) || reservedPaths.contains(url.standardizedFileURL.path) else {
+            return url
+        }
+        let directory = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        var counter = 2
+        while true {
+            let name = ext.isEmpty ? "\(stem) (\(counter))" : "\(stem) (\(counter)).\(ext)"
+            let candidate = directory.appendingPathComponent(name)
+            if !fileManager.fileExists(atPath: candidate.path), !reservedPaths.contains(candidate.standardizedFileURL.path) {
+                return candidate
+            }
+            counter += 1
+        }
+    }
+
+    nonisolated private static func performPreparedTransfer(_ transfer: PreparedTransfer) -> FileOperationItemResult {
+        guard !Task.isCancelled else {
+            return FileOperationItemResult(
+                source: transfer.source,
+                destination: transfer.destination,
+                outcome: .cancelled,
+                message: "Operation cancelled.",
+                replacedItemInTrash: nil
+            )
+        }
+
+        let manager = FileManager.default
+        var replacedTrashURL: URL?
+        if transfer.replacesExistingItem {
+            do {
+                var trashURL: NSURL?
+                try manager.trashItem(at: transfer.destination, resultingItemURL: &trashURL)
+                replacedTrashURL = trashURL as URL?
+            } catch {
+                return FileOperationItemResult(
+                    source: transfer.source,
+                    destination: transfer.destination,
+                    outcome: .failed,
+                    message: "Could not preserve the existing item: \(error.localizedDescription)",
+                    replacedItemInTrash: nil
+                )
+            }
+        }
+
+        do {
+            if transfer.kind == .move {
+                try manager.moveItem(at: transfer.source, to: transfer.destination)
+            } else {
+                try manager.copyItem(at: transfer.source, to: transfer.destination)
+            }
+            return FileOperationItemResult(
+                source: transfer.source,
+                destination: transfer.destination,
+                outcome: .succeeded,
+                message: nil,
+                replacedItemInTrash: replacedTrashURL
+            )
+        } catch {
+            let originalError = error
+            if let replacedTrashURL {
+                do {
+                    try manager.moveItem(at: replacedTrashURL, to: transfer.destination)
+                } catch {
+                    return FileOperationItemResult(
+                        source: transfer.source,
+                        destination: transfer.destination,
+                        outcome: .failed,
+                        message: "\(originalError.localizedDescription) The replaced item also could not be restored: \(error.localizedDescription)",
+                        replacedItemInTrash: nil
+                    )
+                }
+            }
+            return FileOperationItemResult(
+                source: transfer.source,
+                destination: transfer.destination,
+                outcome: .failed,
+                message: originalError.localizedDescription,
+                replacedItemInTrash: nil
+            )
+        }
+    }
+
+    private func performParallel(
+        _ sources: [URL],
+        progress: ProgressHandler?,
+        operation: @Sendable @escaping (Int, URL) -> FileOperationItemResult
+    ) async -> [FileOperationItemResult] {
+        guard !sources.isEmpty else { return [] }
+        await progress?(FileOperationProgress(completed: 0, total: sources.count, currentItem: sources.first))
+
+        var orderedResults = Array<FileOperationItemResult?>(repeating: nil, count: sources.count)
+        var completed = 0
+        await withTaskGroup(of: (Int, FileOperationItemResult).self) { group in
+            for (index, source) in sources.enumerated() {
+                group.addTask {
+                    guard !Task.isCancelled else {
+                        return (index, FileOperationItemResult(
+                            source: source,
+                            destination: nil,
+                            outcome: .cancelled,
+                            message: "Operation cancelled.",
+                            replacedItemInTrash: nil
+                        ))
+                    }
+                    return (index, operation(index, source))
+                }
+            }
+
+            for await (index, itemResult) in group {
+                orderedResults[index] = itemResult
+                completed += 1
+                await progress?(FileOperationProgress(
+                    completed: completed,
+                    total: sources.count,
+                    currentItem: completed == sources.count ? nil : itemResult.source
+                ))
+            }
+        }
+        return orderedResults.enumerated().map { index, result in
+            result ?? self.result(source: sources[index], outcome: .cancelled, message: "Operation cancelled.")
+        }
+    }
+
+    nonisolated private static func trashItem(_ source: URL) -> FileOperationItemResult {
+        do {
+            var trashURL: NSURL?
+            try FileManager.default.trashItem(at: source, resultingItemURL: &trashURL)
+            return FileOperationItemResult(source: source, destination: trashURL as URL?, outcome: .succeeded, message: nil, replacedItemInTrash: nil)
+        } catch {
+            return FileOperationItemResult(source: source, destination: nil, outcome: .failed, message: error.localizedDescription, replacedItemInTrash: nil)
+        }
+    }
+
+    nonisolated private static func duplicateItem(_ source: URL, to destination: URL) -> FileOperationItemResult {
+        do {
+            try FileManager.default.copyItem(at: source, to: destination)
+            return FileOperationItemResult(source: source, destination: destination, outcome: .succeeded, message: nil, replacedItemInTrash: nil)
+        } catch {
+            return FileOperationItemResult(source: source, destination: destination, outcome: .failed, message: error.localizedDescription, replacedItemInTrash: nil)
+        }
+    }
+
+    private func uniqueDuplicateURL(for source: URL, reserving reservedPaths: Set<String> = []) -> URL {
         let directory = source.deletingLastPathComponent()
         let stem = source.deletingPathExtension().lastPathComponent
         let ext = source.pathExtension
@@ -426,14 +559,11 @@ actor FileOperationService {
             let suffix = counter == 1 ? " copy" : " copy \(counter)"
             let name = ext.isEmpty ? "\(stem)\(suffix)" : "\(stem)\(suffix).\(ext)"
             let candidate = directory.appendingPathComponent(name)
-            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
+            if !fileManager.fileExists(atPath: candidate.path), !reservedPaths.contains(candidate.standardizedFileURL.path) {
+                return candidate
+            }
             counter += 1
         }
-    }
-
-    private struct ArchiveEntry {
-        let fileURL: URL
-        let path: String
     }
 
     private func archiveEntries(for sources: [URL]) throws -> [ArchiveEntry] {
@@ -492,7 +622,7 @@ actor FileOperationService {
         }
     }
 
-    private func validateArchive(at url: URL, expectedPaths: Set<String>) throws {
+    nonisolated private static func validateArchive(at url: URL, expectedPaths: Set<String>) throws {
         let archive = try Archive(url: url, accessMode: .read)
         let actualPaths = Set(archive.map { $0.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) })
         let normalizedExpected = Set(expectedPaths.map {
@@ -523,7 +653,7 @@ actor FileOperationService {
 enum SafeImageRotator {
     static let supportedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff"]
 
-    static func rotateCopy(at source: URL, quarterTurns: Int, fileManager: FileManager = .default) throws -> URL {
+    static func rotateInPlace(at source: URL, quarterTurns: Int, fileManager: FileManager = .default) throws -> URL {
         let ext = source.pathExtension.lowercased()
         guard supportedExtensions.contains(ext) else {
             throw FileOperationError.unsupportedImageFormat(ext.isEmpty ? "unknown" : ext)
@@ -545,8 +675,7 @@ enum SafeImageRotator {
             clockwiseQuarterTurns: normalizedTurns
         )
 
-        let finalURL = uniqueRotatedURL(for: source, fileManager: fileManager)
-        let temporaryURL = finalURL.deletingLastPathComponent()
+        let temporaryURL = source.deletingLastPathComponent()
             .appendingPathComponent(".folder-rotation-\(UUID().uuidString).\(ext)")
         defer { try? fileManager.removeItem(at: temporaryURL) }
 
@@ -578,13 +707,10 @@ enum SafeImageRotator {
         }
 
         let metadataFlags = copyfile_flags_t(COPYFILE_METADATA | COPYFILE_NOFOLLOW_SRC | COPYFILE_NOFOLLOW_DST)
-        let metadataResult = source.path.withCString { sourcePath in
+        _ = source.path.withCString { sourcePath in
             temporaryURL.path.withCString { destinationPath in
                 copyfile(sourcePath, destinationPath, nil, metadataFlags)
             }
-        }
-        guard metadataResult == 0 else {
-            throw FileOperationError.unableToPreserveImageMetadata
         }
 
         guard let validation = CGImageSourceCreateWithURL(temporaryURL as CFURL, nil),
@@ -597,11 +723,23 @@ enum SafeImageRotator {
         guard writtenOrientation == destinationOrientation.rawValue else {
             throw FileOperationError.unableToValidateOutput
         }
-        guard metadataIsOtherwisePreserved(sourceProperties, validationProperties) else {
-            throw FileOperationError.unableToValidateOutput
+
+        // `rename` replaces the original atomically because both URLs are
+        // siblings on the same volume. A failed validation or replacement
+        // therefore always leaves the original image intact.
+        let replacementResult = temporaryURL.path.withCString { temporaryPath in
+            source.path.withCString { sourcePath in
+                rename(temporaryPath, sourcePath)
+            }
         }
-        try fileManager.moveItem(at: temporaryURL, to: finalURL)
-        return finalURL
+        guard replacementResult == 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "The rotated image could not replace the original file."]
+            )
+        }
+        return source
     }
 
     /// Compose a visual clockwise rotation with the existing EXIF transform,
@@ -628,62 +766,4 @@ enum SafeImageRotator {
         return result
     }
 
-    private static func metadataIsOtherwisePreserved(
-        _ source: [CFString: Any],
-        _ destination: [CFString: Any]
-    ) -> Bool {
-        metadataValue(
-            removingOrientation(from: source),
-            isPreservedIn: removingOrientation(from: destination)
-        )
-    }
-
-    private static func metadataValue(_ source: Any, isPreservedIn destination: Any) -> Bool {
-        if let sourceDictionary = source as? [String: Any],
-           let destinationDictionary = destination as? [String: Any] {
-            return sourceDictionary.allSatisfy { key, sourceValue in
-                guard let destinationValue = destinationDictionary[key] else { return false }
-                return metadataValue(sourceValue, isPreservedIn: destinationValue)
-            }
-        }
-        if let sourceArray = source as? NSArray,
-           let destinationArray = destination as? NSArray {
-            return sourceArray.isEqual(to: destinationArray as! [Any])
-        }
-        if let sourceObject = source as? NSObject,
-           let destinationObject = destination as? NSObject {
-            return sourceObject.isEqual(destinationObject)
-        }
-        return String(describing: source) == String(describing: destination)
-    }
-
-    private static func removingOrientation(from dictionary: [CFString: Any]) -> [String: Any] {
-        dictionary.reduce(into: [String: Any]()) { result, pair in
-            let key = pair.key as String
-            guard key.caseInsensitiveCompare(kCGImagePropertyOrientation as String) != .orderedSame,
-                  key.caseInsensitiveCompare("Orientation") != .orderedSame else {
-                return
-            }
-            if let nested = pair.value as? [CFString: Any] {
-                result[key] = removingOrientation(from: nested)
-            } else if let nested = pair.value as? [String: Any] {
-                result[key] = removingOrientation(from: Dictionary(uniqueKeysWithValues: nested.map { ($0.key as CFString, $0.value) }))
-            } else {
-                result[key] = pair.value
-            }
-        }
-    }
-
-    private static func uniqueRotatedURL(for source: URL, fileManager: FileManager) -> URL {
-        let directory = source.deletingLastPathComponent()
-        let stem = source.deletingPathExtension().lastPathComponent
-        let ext = source.pathExtension
-        var counter = 1
-        while true {
-            let suffix = counter == 1 ? " rotated" : " rotated \(counter)"
-            let candidate = directory.appendingPathComponent("\(stem)\(suffix).\(ext)")
-            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
-            counter += 1
-        }
-    }
 }

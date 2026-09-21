@@ -14,6 +14,8 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var viewModel: FileExplorerViewModel
     @StateObject private var searchViewModel: SearchViewModel
+    @StateObject private var operationCoordinator = FileOperationCoordinator.shared
+    @StateObject private var volumeManager = VolumeManager.shared
     @State private var tabManager: FolderTabManager?
     @EnvironmentObject private var settingsManager: SettingsManager
 
@@ -46,6 +48,24 @@ struct ContentView: View {
             } else {
                 viewModel.navigate(to: firstURL)
             }
+        }
+        .sheet(item: $operationCoordinator.presentedReport) { presented in
+            FileOperationResultView(
+                report: presented.report,
+                onReveal: { operationCoordinator.reveal($0) },
+                onDone: { operationCoordinator.presentedReport = nil }
+            )
+        }
+        .alert(
+            "Could Not Eject Volume",
+            isPresented: Binding(
+                get: { volumeManager.lastEjectError != nil },
+                set: { if !$0 { volumeManager.clearEjectError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) { volumeManager.clearEjectError() }
+        } message: {
+            Text(volumeManager.lastEjectError ?? "")
         }
     }
 
@@ -171,7 +191,9 @@ struct FolderBrowserView: View {
     @StateObject private var operationCoordinator = FileOperationCoordinator.shared
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var volumeManager = VolumeManager.shared
+    @StateObject private var quickLookManager = QuickLookManager.shared
     @State private var keyEventMonitor: Any?
+    @State private var renameDismissMonitor: Any?
     @State private var showingSearchErrors = false
     /// Ob die Sidebar tatsächlich zu ist — auch wenn nur das schmale Fenster
     /// sie zugeklappt hat. Danach richten sich Leiste, Anfasser und Trennstrich.
@@ -180,6 +202,7 @@ struct FolderBrowserView: View {
     @State private var appliedDefaultViewMode: AppSettings.DisplayMode?
     @State private var appliedIconSize: Int?
     @State private var appliedHiddenFiles: Bool?
+    @State private var appliedIgnoreDSStoreFiles: Bool?
     @EnvironmentObject var settingsManager: SettingsManager
 
     init(
@@ -208,19 +231,36 @@ struct FolderBrowserView: View {
                 mainContentArea
             }
         }
-        // Der Griff bleibt am Rand stehen, wenn die Sidebar zu ist — sonst gäbe
-        // es keinen Weg mehr, sie dort aufzuziehen. Er liegt bewusst ÜBER dem
-        // Inhalt: der Trennbereich hat eingeklappt keine Breite mehr, also
-        // bliebe darunter kein Platz, an dem er sichtbar wäre.
-        .overlay(alignment: .leading) {
-            if settingsManager.settings.showSidebar && sidebarIsCollapsed {
-                SidebarRevealGrip {
-                    sidebarToggleRequest += 1
+        .overlay(alignment: .bottom) {
+            if operationCoordinator.isProgressPresentationVisible {
+                if operationCoordinator.isProgressPresentationMinimized {
+                    MinimizedFileOperationProgressView(
+                        progress: operationCoordinator.progress,
+                        onRestore: { operationCoordinator.restoreProgressPresentation() }
+                    )
+                    .padding(20)
+                } else {
+                    FileOperationProgressView(
+                        progress: operationCoordinator.progress,
+                        samples: operationCoordinator.transferProgressSamples,
+                        isCancellationRequested: operationCoordinator.isCancellationRequested,
+                        onCancel: { operationCoordinator.cancel() },
+                        onMinimize: { operationCoordinator.minimizeProgressPresentation() },
+                        startedAt: operationCoordinator.operationStartedAt ?? Date(),
+                        settledDragOffset: operationCoordinator.progressPresentationOffset,
+                        onMoveFinished: { operationCoordinator.moveProgressPresentation(by: $0) }
+                    )
+                    .frame(maxWidth: 460)
+                    .padding(20)
                 }
             }
         }
+        // Der zugeklappte Rand liegt bewusst **nicht** unter einer SwiftUI-Ebene.
+        // Ein Streifen darüber fing den Zug ab und konnte ihn nur in ein
+        // Umschalten verwandeln — aufziehen wie zuziehen war damit unmöglich.
+        // Den Rand bedient deshalb die Trennansicht selbst.
         .overlay {
-            if viewModel.isProcessing {
+            if viewModel.isProcessing && !operationCoordinator.isProcessing {
                 VStack(spacing: 8) {
                     ProgressView()
                         .scaleEffect(0.8)
@@ -239,16 +279,35 @@ struct FolderBrowserView: View {
         .ignoresSafeArea(.container, edges: .top)
         .onAppear {
             setupKeyboardHandling()
+            setupRenameDismissHandling()
+            BrowserEditCommands.shared.activate(browser: viewModel, search: searchViewModel)
             rememberAppliedViewSettings()
         }
         .onDisappear {
+            BrowserEditCommands.shared.deactivate(browser: viewModel)
             if let keyEventMonitor {
                 NSEvent.removeMonitor(keyEventMonitor)
                 self.keyEventMonitor = nil
             }
+            if let renameDismissMonitor {
+                NSEvent.removeMonitor(renameDismissMonitor)
+                self.renameDismissMonitor = nil
+            }
+        }
+        .onChange(of: quickLookManager.selectedPreviewSourceURL) { url in
+            synchronizeQuickLookSelection(url)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("NavigateToPath"))) { notification in
             if let url = notification.object as? URL { viewModel.navigate(to: url) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .createNewFolder)) { _ in
+            createNewFolder()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fileOperationDidFinish)) { _ in
+            // Every completed mutation can change the visible directory,
+            // search results, tags, thumbnails or file metadata. Refreshing
+            // each open browser keeps every window and tab in sync.
+            viewModel.refresh()
         }
         .onReceive(volumeManager.$lastUnmountedVolumeURL.compactMap { $0 }) { volumeURL in
             viewModel.navigateAwayFromUnmountedVolume(volumeURL)
@@ -316,14 +375,6 @@ struct FolderBrowserView: View {
                 tabStrip
                     .padding(.horizontal, 16)
                     .padding(.bottom, 2)
-            }
-
-            // Thin progress bar for background operations
-            if viewModel.isProcessing {
-                ProgressView()
-                    .progressViewStyle(.linear)
-                    .tint(Color.folderAccent)
-                    .frame(height: 2)
             }
 
             // Main Content Area
@@ -456,6 +507,45 @@ struct FolderBrowserView: View {
         }
     }
 
+    /// Ein Klick neben das Umbenennen-Feld beendet es, wie im Finder: der
+    /// getippte Name gilt.
+    ///
+    /// Der Fokuszustand von SwiftUI taugt dafür nicht. Die Kacheln sind
+    /// AppKit-Ansichten; nehmen sie den Tastaturfokus an sich, erfährt
+    /// SwiftUI davon nichts und das Feld bliebe offen stehen. Der Klick
+    /// selbst ist die verlässliche Stelle.
+    private func setupRenameDismissHandling() {
+        guard renameDismissMonitor == nil else { return }
+        renameDismissMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { event in
+            guard viewModel.renamingItem != nil,
+                  event.window === (NSApp.delegate as? AppDelegate)?.mainWindowController?.window
+            else { return event }
+
+            // Der Feldeditor ist die Textansicht, die das Feld gerade bedient.
+            // Ein Klick hinein setzt nur die Schreibmarke um.
+            if let editor = event.window?.firstResponder as? NSTextView,
+               editor.convert(editor.bounds, to: nil).contains(event.locationInWindow) {
+                return event
+            }
+
+            viewModel.commitRename()
+            return event
+        }
+    }
+
+    private func createNewFolder() {
+        guard FileOperationPolicy.isEnabled, FileDropValidation.canWrite(to: viewModel.currentPath) else { return }
+        if viewModel.tagFilterMode != nil {
+            viewModel.exitTagFilterMode()
+        }
+        if searchViewModel.isSearchActive {
+            searchViewModel.deactivateSearch()
+        }
+        viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
+    }
+
     /// Settings are defaults until the user changes one while Folder is open.
     /// At that point the affected browser behavior updates immediately, rather
     /// than making unrelated settings reset the current view or forcing a
@@ -465,6 +555,7 @@ struct FolderBrowserView: View {
         appliedDefaultViewMode = settings.defaultViewMode
         appliedIconSize = settings.iconSize
         appliedHiddenFiles = settings.showHiddenFiles
+        appliedIgnoreDSStoreFiles = settings.ignoreDSStoreFiles
     }
 
     private func applyChangedViewSettings() {
@@ -484,16 +575,26 @@ struct FolderBrowserView: View {
             appliedHiddenFiles = settings.showHiddenFiles
             viewModel.refresh()
         }
+
+        if appliedIgnoreDSStoreFiles != settings.ignoreDSStoreFiles {
+            appliedIgnoreDSStoreFiles = settings.ignoreDSStoreFiles
+            viewModel.refresh()
+        }
     }
 
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
         // Keep Finder-style browser selection and Quick Look on one shared index.
-        // Consume the event here so the panel cannot process the same arrow again.
+        // This check must precede the browser-window guard: while the preview
+        // panel is key, its window is not the main browser window. Consuming
+        // the arrow here prevents Quick Look from moving independently of the
+        // browser's green selection.
         if QuickLookManager.shared.isPreviewVisible,
            QuickLookManager.navigationDirection(forKeyCode: event.keyCode) != nil,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             return QuickLookManager.shared.handleNavigationKey(event.keyCode)
         }
+
+        guard event.window === (NSApp.delegate as? AppDelegate)?.mainWindowController?.window else { return false }
 
         // Don't intercept events when a text field is being edited (except for Cmd shortcuts)
         let isTextField = NSApp.keyWindow?.firstResponder is NSTextView ||
@@ -510,6 +611,11 @@ struct FolderBrowserView: View {
         // Handle Cmd shortcuts even when text field is active
         if isCommandPressed && !isControlPressed {
             switch event.charactersIgnoringModifiers?.lowercased() {
+            case "n":
+                guard !isOptionPressed, !modifiers.contains(.shift) else { return false }
+                createNewFolder()
+                return true
+
             case "f":
                 // Cmd+F: Activate search (if enabled)
                 if shortcuts.searchEnabled {
@@ -519,40 +625,33 @@ struct FolderBrowserView: View {
                 return false
 
             case "c":
-                guard !isTextField else { return false }
-                copySelectedItems()
+                guard !isTextField, !isOptionPressed, !modifiers.contains(.shift) else { return false }
+                BrowserEditCommands.shared.perform(.copy)
                 return true
 
             case "x":
-                guard !isTextField else { return false }
-                cutSelectedItems()
+                guard !isTextField, !isOptionPressed, !modifiers.contains(.shift) else { return false }
+                BrowserEditCommands.shared.perform(.cut)
                 return true
 
             case "v":
-                guard !isTextField else { return false }
-                operationCoordinator.paste(to: viewModel.currentPath)
+                guard !isTextField, !isOptionPressed, !modifiers.contains(.shift) else { return false }
+                BrowserEditCommands.shared.perform(.paste)
                 return true
 
             case "z":
-                guard !isTextField else { return false }
+                guard !isTextField, !isOptionPressed else { return false }
                 if modifiers.contains(.shift) {
-                    ActionHistoryManager.shared.redo()
+                    BrowserEditCommands.shared.perform(.redo)
                 } else {
-                    ActionHistoryManager.shared.undo()
+                    BrowserEditCommands.shared.perform(.undo)
                 }
                 return true
 
             case "a":
-                // Cmd+A: Select all items
-                if !isTextField {
-                    if searchViewModel.isSearchActive && !searchViewModel.searchResults.isEmpty {
-                        searchViewModel.selectAll()
-                    } else {
-                        viewModel.selectAll()
-                    }
-                    return true
-                }
-                return false
+                guard !isTextField, !isOptionPressed, !modifiers.contains(.shift) else { return false }
+                BrowserEditCommands.shared.perform(.selectAll)
+                return true
 
             case "i":
                 guard !isTextField else { return false }
@@ -713,33 +812,14 @@ struct FolderBrowserView: View {
     }
 
     private func navigateIntoSelectedFolder() {
-        if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
-            guard let firstSelected = searchViewModel.selectedItems.first,
-                  let item = searchViewModel.searchResults.first(where: { $0.id == firstSelected }),
-                  item.type == .folder else { return }
-            viewModel.navigate(to: item.path)
+        if searchViewModel.isSearchActive && !searchViewModel.searchQuery.isEmpty {
+            let item = searchViewModel.searchResults.first(where: { searchViewModel.selectedItems.contains($0.id) })
+                ?? searchViewModel.searchResults.first(where: { $0.type == .folder })
+            guard item?.type == .folder, let path = item?.path else { return }
+            viewModel.navigate(to: path)
         } else {
-            guard let firstSelected = viewModel.selectedItems.first,
-                  let item = viewModel.items.first(where: { $0.id == firstSelected }),
-                  item.type == .folder else { return }
-            viewModel.navigate(to: item.path)
+            viewModel.navigateIntoSelectedFolder()
         }
-    }
-
-    private func copySelectedItems() {
-        let items = searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty
-            ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }
-            : viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
-        guard !items.isEmpty else { return }
-        clipboardManager.copy(items: items)
-    }
-
-    private func cutSelectedItems() {
-        let items = searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty
-            ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }
-            : viewModel.items.filter { viewModel.selectedItems.contains($0.id) }
-        guard !items.isEmpty else { return }
-        clipboardManager.cut(items: items)
     }
 
     // MARK: - File Operations
@@ -760,11 +840,12 @@ struct FolderBrowserView: View {
         let activeID = isSearchPreview
             ? searchViewModel.lastSelectedItem
             : (viewModel.selectedItemID ?? viewModel.lastSelectedItem)
-        guard let startIndex = QuickLookManager.startingPreviewIndex(
+        let startIndex = QuickLookManager.startingPreviewIndex(
             itemIDs: items.map(\.id),
             selectedIDs: selected,
             activeID: activeID
-        ) else { return }
+        ) ?? items.indices.first
+        guard let startIndex else { return }
         // Capture this before Quick Look becomes the key window. Recalculating from
         // NSApp.keyWindow afterward measures the preview panel and produces a bogus
         // (commonly two-column) vertical navigation offset.
@@ -802,18 +883,34 @@ struct FolderBrowserView: View {
                           isGrid: viewModel.viewMode.mode == .iconGrid
                       ) else { return nil }
 
-                let id = items[target].id
-                if isSearchPreview {
-                    searchViewModel.selectedItems = [id]
-                    searchViewModel.lastSelectedItem = id
-                } else {
-                    viewModel.selectedItems = [id]
-                    viewModel.selectedItemID = id
-                    viewModel.lastSelectedItem = id
-                }
                 return target
             }
         )
+    }
+
+    /// Quick Look can move between Folder's generated directory previews and
+    /// native file previews without rebuilding the browser view. Observe its
+    /// source URL so the browser's green selection always represents the item
+    /// the panel is showing.
+    private func synchronizeQuickLookSelection(_ url: URL?) {
+        guard let url else { return }
+        let normalizedURL = url.standardizedFileURL
+
+        if searchViewModel.isSearchActive,
+           let item = searchViewModel.searchResults.first(where: {
+               $0.path.standardizedFileURL == normalizedURL
+           }) {
+            searchViewModel.selectedItems = [item.id]
+            searchViewModel.lastSelectedItem = item.id
+            return
+        }
+
+        guard let item = viewModel.items.first(where: {
+            $0.path.standardizedFileURL == normalizedURL
+        }) else { return }
+        viewModel.selectedItems = [item.id]
+        viewModel.selectedItemID = item.id
+        viewModel.lastSelectedItem = item.id
     }
 
 }
@@ -861,9 +958,12 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         splitView.dividerStyle = .thin
         splitView.delegate = context.coordinator
         let coordinator = context.coordinator
-        splitView.revealCollapsedSidebar = { [weak coordinator] splitView in
+        splitView.beginSidebarReveal = { [weak coordinator] splitView in
             guard let coordinator else { return false }
-            return coordinator.revealManuallyCollapsedSidebar(in: splitView)
+            return coordinator.beginRevealDrag(in: splitView)
+        }
+        splitView.endSidebarReveal = { [weak coordinator] splitView in
+            coordinator?.endRevealDrag(in: splitView)
         }
 
         let sidebarHost = NSHostingView(rootView: sidebar)
@@ -912,6 +1012,14 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         /// automatische Regel sie ihm sofort wieder wegnehmen.
         private var keepSidebarInNarrowWindow = false
 
+        /// Der Nutzer zieht die Sidebar gerade am zugeklappten Rand auf.
+        ///
+        /// Solange das läuft, gilt die Regel „schmaler als die halbe
+        /// Mindestbreite heisst zu“ nicht. Sonst schnappte die Sidebar bei den
+        /// ersten Punkten des Zugs sofort wieder zu und galt danach wieder als
+        /// zugeklappt — jede weitere Bewegung lief dann ins Leere.
+        private var wirdAufgezogen = false
+
         init(isEffectivelyCollapsed: Binding<Bool>) {
             self.isEffectivelyCollapsed = isEffectivelyCollapsed
         }
@@ -945,8 +1053,12 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
             }
         }
 
-        private func collapseSidebar(in splitView: NSSplitView) {
-            if let sidebar = splitView.subviews.first, sidebar.frame.width > 0 {
+        /// `merkeBreite` ist falsch, wenn gerade ein abgebrochenes Aufziehen
+        /// zurückgenommen wird: Die schmale Zwischenbreite von zwanzig Punkten
+        /// darf die gemerkte Breite nicht ersetzen, sonst öffnet der Knopf die
+        /// Sidebar danach als Spalt.
+        private func collapseSidebar(in splitView: NSSplitView, merkeBreite: Bool = true) {
+            if merkeBreite, let sidebar = splitView.subviews.first, sidebar.frame.width > 0 {
                 lastExpandedWidth = sidebar.frame.width
             }
             sidebarIsManuallyCollapsed = true
@@ -977,21 +1089,56 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
             sidebarIsCollapsedForWindow || sidebarIsManuallyCollapsed
         }
 
-        /// The collapsed edge remains draggable. Revealing restores the last
-        /// usable sidebar width before the native split view tracks the drag.
+        /// Aufklappen auf die gemerkte Breite — für den Knopf in der Leiste.
         func revealManuallyCollapsedSidebar(in splitView: NSSplitView) -> Bool {
             guard isActuallyCollapsed else { return false }
+            hebeGründeFürZuAuf()
+            splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
+            publishCollapsedState()
+            return true
+        }
 
-            // Beide Gründe aufheben. Vorher zählte nur der vom Nutzer gewählte —
-            // im schmalen Fenster liess sich die Sidebar deshalb gar nicht holen.
+        /// Der Zug am zugeklappten Rand beginnt.
+        ///
+        /// Hier wird **keine** Breite gesetzt: Die bestimmt allein die Maus,
+        /// sonst springt die Sidebar erst auf die gemerkte Breite und fällt im
+        /// nächsten Moment auf die Zeigerposition zurück.
+        func beginRevealDrag(in splitView: NSSplitView) -> Bool {
+            guard isActuallyCollapsed else { return false }
+            hebeGründeFürZuAuf()
+            // Eine zugeklappte Fläche ist ausgeblendet. Bleibt sie das, bewegt
+            // der Zug eine unsichtbare Sidebar.
+            splitView.subviews.first?.isHidden = false
+            wirdAufgezogen = true
+            publishCollapsedState()
+            return true
+        }
+
+        /// Der Zug endet. Weit genug aufgezogen bleibt offen — mindestens auf
+        /// der Mindestbreite, damit keine unbrauchbare Spalte stehen bleibt.
+        /// Zu wenig gezogen heisst: es war keine Absicht, also wieder zu.
+        func endRevealDrag(in splitView: NSSplitView) {
+            guard wirdAufgezogen else { return }
+            wirdAufgezogen = false
+            let breite = splitView.subviews.first?.frame.width ?? 0
+            if breite < SidebarSplitMetrics.minimumWidth / 2 {
+                collapseSidebar(in: splitView, merkeBreite: false)
+                return
+            }
+            let ziel = clamped(max(breite, SidebarSplitMetrics.minimumWidth), in: splitView)
+            lastExpandedWidth = ziel
+            splitView.setPosition(ziel, ofDividerAt: 0)
+            publishCollapsedState()
+        }
+
+        /// Beide Gründe aufheben. Vorher zählte nur der vom Nutzer gewählte —
+        /// im schmalen Fenster liess sich die Sidebar deshalb gar nicht holen.
+        private func hebeGründeFürZuAuf() {
             sidebarIsManuallyCollapsed = false
             if sidebarIsCollapsedForWindow {
                 sidebarIsCollapsedForWindow = false
                 keepSidebarInNarrowWindow = true
             }
-            splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
-            publishCollapsedState()
-            return true
         }
 
         func clamped(_ width: CGFloat, in splitView: NSSplitView) -> CGFloat {
@@ -1031,6 +1178,14 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
             constrainSplitPosition proposedPosition: CGFloat,
             ofSubviewAt dividerIndex: Int
         ) -> CGFloat {
+            // Beim Aufziehen folgt die Kante frei der Maus, auch unterhalb der
+            // Mindestbreite. Ob daraus ein offener Zustand wird, entscheidet
+            // erst das Loslassen.
+            if wirdAufgezogen {
+                let obereGrenze = clamped(SidebarSplitMetrics.maximumWidth, in: splitView)
+                return min(max(proposedPosition, 0), obereGrenze)
+            }
+
             guard !isActuallyCollapsed else { return 0 }
 
             // Weit genug nach links gezogen heisst zu — und zwar in denselben
@@ -1055,6 +1210,10 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         func splitViewDidResizeSubviews(_ notification: Notification) {
             guard let splitView = notification.object as? NSSplitView,
                   let sidebar = splitView.subviews.first else { return }
+
+            // Während des Aufziehens ist jede Zwischenbreite gewollt, auch null.
+            // Wer hier eingreift, nimmt dem Nutzer den Zug aus der Hand.
+            guard !wirdAufgezogen else { return }
 
             let windowIsNarrow = splitView.bounds.width <= SidebarSplitMetrics.collapseWindowWidth
             if windowIsNarrow, !sidebarIsCollapsedForWindow, !keepSidebarInNarrowWindow {
@@ -1099,9 +1258,17 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
 }
 
 final class FolderNativeSplitView: NSSplitView {
-    var revealCollapsedSidebar: ((FolderNativeSplitView) -> Bool)?
+    var beginSidebarReveal: ((FolderNativeSplitView) -> Bool)?
+    var endSidebarReveal: ((FolderNativeSplitView) -> Void)?
 
     private var sidebarIsCollapsed: Bool { (subviews.first?.frame.width ?? 0) < 1 }
+
+    /// Der greifbare Rand bei zugeklappter Sidebar.
+    ///
+    /// Breiter als der Trennbereich selbst, weil dessen acht Punkte mit der
+    /// Maus kaum zu treffen sind. Nur solange die Sidebar zu ist — offen
+    /// gehört die Fläche wieder dem Inhalt.
+    private static let revealZoneWidth: CGFloat = 16
 
     /// **Konstant.** Eine bewegliche Breite wäre die naheliegende Idee — null,
     /// solange die Sidebar zu ist — und genau das ging schief: Beim Aufklappen
@@ -1113,46 +1280,67 @@ final class FolderNativeSplitView: NSSplitView {
     /// unterscheiden. Die Geometrie bleibt dabei in jedem Zustand dieselbe.
     override var dividerThickness: CGFloat { SidebarSplitMetrics.dividerWidth }
 
+    /// Der zugeklappte Rand muss die Maus selbst annehmen. Ohne das landet der
+    /// Klick auf der Inhaltsfläche, die dort beginnt, und der Zug kommt nie an.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard sidebarIsCollapsed, let superview else { return super.hitTest(point) }
+        let lokal = convert(point, from: superview)
+        if bounds.contains(lokal), lokal.x <= Self.revealZoneWidth { return self }
+        return super.hitTest(point)
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        // Auf und zu wechselt den Zeiger. Ohne diese Ansage behält das Fenster
+        // den alten Bereich, bis irgendetwas anderes ihn neu berechnet.
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard sidebarIsCollapsed else { return }
+        // Der Zeiger sagt, dass hier etwas aufzuziehen ist — dieselbe Ansage,
+        // die der offene Trennbereich macht.
+        addCursorRect(
+            NSRect(x: 0, y: 0, width: Self.revealZoneWidth, height: bounds.height),
+            cursor: .resizeRight
+        )
+    }
+
     override func mouseDown(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
-        let isCollapsed = sidebarIsCollapsed
-        let revealZoneWidth = max(dividerThickness + 4, 12)
-        guard isCollapsed, location.x <= revealZoneWidth,
-              let revealCollapsedSidebar else {
+        guard sidebarIsCollapsed, location.x <= Self.revealZoneWidth,
+              let beginSidebarReveal, let window else {
             super.mouseDown(with: event)
             return
         }
 
-        // A click on the edge must stay a click. Only a real horizontal drag
-        // reveals the sidebar, then continues as a native divider drag.
-        guard let window else { return }
+        // Ein Klick auf den Rand bleibt ein Klick — aufziehen tut nur der Zug.
+        // Danach folgt die Kante der Maus, genau wie beim Zuziehen.
         let startX = location.x
-        var didReveal = false
+        var ziehtAuf = false
         window.trackEvents(
             matching: [.leftMouseDragged, .leftMouseUp],
             timeout: .greatestFiniteMagnitude,
             mode: .eventTracking
         ) { [weak self] trackedEvent, stop in
-            guard let self else {
-                stop.pointee = true
-                return
-            }
-            guard let trackedEvent else {
+            guard let self, let trackedEvent else {
                 stop.pointee = true
                 return
             }
             if trackedEvent.type == .leftMouseUp {
+                if ziehtAuf { self.endSidebarReveal?(self) }
                 stop.pointee = true
                 return
             }
             let trackedLocation = self.convert(trackedEvent.locationInWindow, from: nil)
-            guard didReveal || trackedLocation.x - startX >= 3 else { return }
-            if !didReveal {
-                guard revealCollapsedSidebar(self) else {
+            guard ziehtAuf || trackedLocation.x - startX >= 3 else { return }
+            if !ziehtAuf {
+                guard beginSidebarReveal(self) else {
                     stop.pointee = true
                     return
                 }
-                didReveal = true
+                ziehtAuf = true
             }
             self.setPosition(trackedLocation.x, ofDividerAt: 0)
         }
@@ -1175,13 +1363,15 @@ final class FolderNativeSplitView: NSSplitView {
     /// Deshalb wird die Fläche zuerst gefüllt. Was darunter lag, ist damit weg,
     /// und es bleibt genau eine Trennlinie — die, die wir selbst setzen.
     override func drawDivider(in rect: NSRect) {
-        // Zugeklappt: den Grund des Inhalts nehmen und sonst nichts. Der Bereich
-        // ist dann von einem gewöhnlichen Rand nicht zu unterscheiden — kein
-        // Streifen, keine Linie, kein Griff. Der Anfasser zum Aufziehen liegt
-        // als eigene Fläche darüber.
+        // A closed sidebar keeps one subtle, native grip at the edge. The
+        // split view itself owns this state, so the grip cannot remain visible
+        // after the sidebar has reopened.
         guard !sidebarIsCollapsed else {
             NSColor.folderBase.setFill()
             rect.fill()
+            let grip = NSRect(x: rect.midX - 2, y: rect.midY - 22, width: 4, height: 44)
+            NSColor.secondaryLabelColor.withAlphaComponent(0.55).setFill()
+            NSBezierPath(roundedRect: grip, xRadius: 2, yRadius: 2).fill()
             return
         }
 
@@ -1194,55 +1384,6 @@ final class FolderNativeSplitView: NSSplitView {
         let grip = NSRect(x: rect.midX - 1.5, y: rect.midY - 17, width: 3, height: 34)
         NSColor.secondaryLabelColor.withAlphaComponent(0.55).setFill()
         NSBezierPath(roundedRect: grip, xRadius: 1.5, yRadius: 1.5).fill()
-    }
-}
-
-/// Der Anfasser am linken Rand, wenn die Sidebar eingeklappt ist.
-///
-/// Der **ganze Rand** über die volle Höhe holt sie zurück, nicht nur der
-/// sichtbare Strich — ein vier Punkt breiter Balken lässt sich mit der Maus
-/// nicht zuverlässig treffen. Der Strich ist nur das, was man sieht; getroffen
-/// wird ein breiterer, unsichtbarer Streifen darum herum.
-///
-/// Klick genügt. Ein Zug nach rechts tut dasselbe, weil man es an einer solchen
-/// Kante zuerst probiert.
-private struct SidebarRevealGrip: View {
-    let reveal: () -> Void
-
-    @State private var isHovering = false
-
-    var body: some View {
-        ZStack(alignment: .leading) {
-            Color.clear
-                .frame(width: 12)
-                .frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-
-            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                .fill(Color.secondary.opacity(isHovering ? 0.9 : 0.45))
-                .frame(width: isHovering ? 5 : 4, height: isHovering ? 56 : 44)
-                .padding(.leading, 2)
-        }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
-        .onHover { hovering in
-            isHovering = hovering
-            // Der Zeiger sagt, dass hier etwas aufzuziehen ist, bevor man klickt.
-            if hovering {
-                NSCursor.resizeRight.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-        .onTapGesture(perform: reveal)
-        .gesture(
-            DragGesture(minimumDistance: 2)
-                .onChanged { zug in
-                    // Nur nach rechts — nach links gibt es nichts aufzuziehen.
-                    if zug.translation.width > 2 { reveal() }
-                }
-        )
-        .help("Sidebar aufziehen")
-        .accessibilityLabel("Sidebar aufziehen")
     }
 }
 

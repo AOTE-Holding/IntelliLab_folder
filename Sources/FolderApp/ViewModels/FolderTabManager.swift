@@ -83,6 +83,7 @@ final class FolderTabManager: ObservableObject {
 
 extension Notification.Name {
     static let openFolders = Notification.Name("OpenFolders")
+    static let createNewFolder = Notification.Name("CreateNewFolder")
     static let createFolderTab = Notification.Name("CreateFolderTab")
     static let closeFolderTab = Notification.Name("CloseFolderTab")
 }

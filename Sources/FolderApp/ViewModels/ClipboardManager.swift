@@ -38,7 +38,7 @@ final class ClipboardManager: ObservableObject {
     /// Executes immediately only when there are no conflicts. If conflicts
     /// exist, the caller receives a preview and can ask the user for one of the
     /// four explicit decisions before any file is changed.
-    func paste(to destination: URL) async throws -> PasteResult {
+    func paste(to destination: URL, progress: FileOperationService.ProgressHandler? = nil) async throws -> PasteResult {
         let urls = try pasteboardURLs()
         let action = effectiveAction(for: urls)
         let kind: FileOperationKind = action == .cut ? .move : .copy
@@ -49,21 +49,23 @@ final class ClipboardManager: ObservableObject {
                 succeeded: [],
                 failed: [],
                 conflicts: preview.conflicts,
+                cancelled: [],
                 sourceURLsForHistory: [],
                 actionType: action,
                 wasCancelled: false
             )
         }
-        return await executePaste(urls: urls, to: destination, action: action, resolution: .skip)
+        return await executePaste(urls: urls, to: destination, action: action, resolution: .skip, progress: progress)
     }
 
     func pasteWithResolution(
         to destination: URL,
-        conflictResolution: FileConflictResolution
+        conflictResolution: FileConflictResolution,
+        progress: FileOperationService.ProgressHandler? = nil
     ) async throws -> PasteResult {
         let urls = try pasteboardURLs()
         let action = effectiveAction(for: urls)
-        return await executePaste(urls: urls, to: destination, action: action, resolution: conflictResolution)
+        return await executePaste(urls: urls, to: destination, action: action, resolution: conflictResolution, progress: progress)
     }
 
     func hasClipboardContent() -> Bool {
@@ -128,7 +130,8 @@ final class ClipboardManager: ObservableObject {
         urls: [URL],
         to destination: URL,
         action: ClipboardAction,
-        resolution: FileConflictResolution
+        resolution: FileConflictResolution,
+        progress: FileOperationService.ProgressHandler?
     ) async -> PasteResult {
         isProcessing = true
         defer { isProcessing = false }
@@ -141,7 +144,8 @@ final class ClipboardManager: ObservableObject {
             urls,
             to: destination,
             kind: kind,
-            conflictResolution: resolution
+            conflictResolution: resolution,
+            progress: progress
         )
         let successful = report.succeeded
         let result = PasteResult(
@@ -150,6 +154,7 @@ final class ClipboardManager: ObservableObject {
                 PasteFailure(url: $0.source, message: $0.message ?? "Unknown file-system error")
             },
             conflicts: report.skipped.map(\.source),
+            cancelled: report.cancelled.map(\.source),
             sourceURLsForHistory: successful.map(\.source),
             actionType: action,
             wasCancelled: report.wasCancelled
@@ -178,6 +183,7 @@ struct PasteResult: Sendable {
     let succeeded: [URL]
     let failed: [PasteFailure]
     let conflicts: [URL]
+    let cancelled: [URL]
     let sourceURLsForHistory: [URL]
     let actionType: ClipboardManager.ClipboardAction
     let wasCancelled: Bool

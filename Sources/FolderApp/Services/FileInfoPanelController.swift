@@ -5,6 +5,7 @@
 
 import AppKit
 import SwiftUI
+import ImageIO
 
 /// A small non-modal inspector, matching Finder's Get Info workflow while
 /// keeping the user in Folder instead of handing the selection to Finder.
@@ -23,7 +24,7 @@ final class FileInfoPanelController {
             panel.contentView = NSHostingView(rootView: rootView)
         } else {
             let panel = NSPanel(
-                contentRect: NSRect(x: 0, y: 0, width: 360, height: 430),
+                contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
                 styleMask: [.titled, .closable, .utilityWindow, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
@@ -55,16 +56,16 @@ private struct FileInfoView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 13) {
-                Image(systemName: item.type == .folder ? "folder.fill" : item.iconName)
-                    .font(.system(size: 31, weight: .medium))
-                    .foregroundStyle(item.type == .folder ? Color.folderAccent : Color.secondary)
-                    .frame(width: 46, height: 46)
-                    .background(Color.folderAccent.opacity(item.type == .folder ? 0.12 : 0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                Image(nsImage: NSWorkspace.shared.icon(forFile: item.path.path))
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 54, height: 54)
+                    .padding(5)
+                    .background(Color.folderSubtleFill, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(item.name)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.system(size: 18, weight: .semibold))
                         .lineLimit(2)
                         .textSelection(.enabled)
                     Text(snapshot.kind)
@@ -80,24 +81,51 @@ private struct FileInfoView: View {
             Divider()
                 .overlay(Color.folderStroke.opacity(0.72))
 
-            VStack(spacing: 0) {
-                InfoRow(label: "Kind", value: snapshot.kind)
-                InfoRow(label: "Size", value: snapshot.size)
-                InfoRow(label: "Where", value: snapshot.location)
-                InfoRow(label: "Created", value: snapshot.created)
-                InfoRow(label: "Modified", value: snapshot.modified)
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    InfoSection("General") {
+                        InfoRow(label: "Kind", value: snapshot.kind)
+                        InfoRow(label: "Size", value: snapshot.size)
+                        InfoRow(label: "Size on disk", value: snapshot.allocatedSize)
+                        InfoRow(label: "Where", value: snapshot.location, multiline: true)
+                        InfoRow(label: "Created", value: snapshot.created)
+                        InfoRow(label: "Modified", value: snapshot.modified)
+                        InfoRow(label: "Last opened", value: snapshot.lastOpened)
+                    }
 
-            Spacer(minLength: 0)
+                    InfoSection("Name & Extension") {
+                        InfoRow(label: "Name", value: item.name, multiline: true)
+                        InfoRow(label: "Extension", value: snapshot.extensionName)
+                        InfoRow(label: "Type identifier", value: snapshot.typeIdentifier, multiline: true)
+                    }
+
+                    if !snapshot.tags.isEmpty {
+                        InfoSection("Tags") {
+                            InfoRow(label: "Finder tags", value: snapshot.tags.joined(separator: ", "), multiline: true)
+                        }
+                    }
+
+                    if let imageDetails = snapshot.imageDetails {
+                        InfoSection("Image Details") {
+                            InfoRow(label: "Dimensions", value: imageDetails.dimensions)
+                            if let colorModel = imageDetails.colorModel {
+                                InfoRow(label: "Color model", value: colorModel)
+                            }
+                        }
+                    }
+
+                    InfoSection("Access") {
+                        InfoRow(label: "Owner", value: snapshot.owner)
+                        InfoRow(label: "Group", value: snapshot.group)
+                        InfoRow(label: "Permissions", value: snapshot.permissions)
+                        InfoRow(label: "Locked", value: snapshot.isLocked ? "Yes" : "No")
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 18)
+            }
 
             HStack {
-                Button("Show in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([item.path])
-                }
-                .buttonStyle(.bordered)
-
                 Spacer()
 
                 Button("Done") {
@@ -109,28 +137,52 @@ private struct FileInfoView: View {
             .padding(20)
             .background(Color.folderSurface.opacity(0.45))
         }
-        .frame(width: 360, height: 430)
+        .frame(width: 520, height: 680)
         .background(Color.folderBase)
         // Kein festes Dunkel: das Infofenster folgt dem eingestellten
         // Erscheinungsbild wie jedes andere Fenster auch.
     }
 }
 
+private struct InfoSection<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.folderAccent)
+                .textCase(.uppercase)
+            VStack(spacing: 0) { content }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Color.folderSubtleFill.opacity(0.65), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+}
+
 private struct InfoRow: View {
     let label: String
     let value: String
+    var multiline = false
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 16) {
             Text(label)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-                .frame(width: 62, alignment: .leading)
+                .frame(width: 112, alignment: .leading)
 
             Text(value)
                 .font(.system(size: 12))
                 .foregroundStyle(.primary)
-                .lineLimit(label == "Where" ? 2 : 1)
+                .lineLimit(multiline ? 3 : 1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -142,16 +194,58 @@ private struct InfoRow: View {
 private struct FileInfoSnapshot {
     let kind: String
     let size: String
+    let allocatedSize: String
     let location: String
     let created: String
     let modified: String
+    let lastOpened: String
+    let extensionName: String
+    let typeIdentifier: String
+    let tags: [String]
+    let owner: String
+    let group: String
+    let permissions: String
+    let isLocked: Bool
+    let imageDetails: ImageDetails?
+
+    struct ImageDetails {
+        let dimensions: String
+        let colorModel: String?
+    }
 
     init(item: FileSystemItem) {
+        let attributes = (try? FileManager.default.attributesOfItem(atPath: item.path.path)) ?? [:]
+        let resourceValues = try? item.path.resourceValues(forKeys: [
+            .totalFileAllocatedSizeKey,
+            .contentAccessDateKey,
+            .typeIdentifierKey,
+            .tagNamesKey
+        ])
+
         kind = Self.kind(for: item)
         size = Self.size(for: item)
+        let allocatedBytes = Int64(resourceValues?.totalFileAllocatedSize ?? Int(item.size))
+        allocatedSize = ByteCountFormatter.string(fromByteCount: allocatedBytes, countStyle: .file)
         location = item.path.deletingLastPathComponent().path
         created = Self.dateFormatter.string(from: item.createdAt)
         modified = Self.dateFormatter.string(from: item.modifiedAt)
+        lastOpened = resourceValues?.contentAccessDate.map(Self.dateFormatter.string(from:)) ?? "—"
+        extensionName = item.path.pathExtension.isEmpty ? "—" : item.path.pathExtension.uppercased()
+        typeIdentifier = resourceValues?.typeIdentifier ?? "—"
+        tags = (resourceValues?.tagNames ?? []).map { raw in
+            raw.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? raw
+        }
+        owner = attributes[.ownerAccountName] as? String ?? "—"
+        group = attributes[.groupOwnerAccountName] as? String ?? "—"
+        if let mode = attributes[.posixPermissions] as? NSNumber {
+            permissions = String(format: "%04o", mode.intValue)
+        } else {
+            permissions = "—"
+        }
+        isLocked = (attributes[.immutable] as? NSNumber)?.boolValue
+            ?? (attributes[.immutable] as? Bool)
+            ?? false
+        imageDetails = Self.imageDetails(for: item.path)
     }
 
     private static func kind(for item: FileSystemItem) -> String {
@@ -183,4 +277,15 @@ private struct FileInfoSnapshot {
         formatter.timeStyle = .short
         return formatter
     }()
+
+    private static func imageDetails(for url: URL) -> ImageDetails? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            return nil
+        }
+        let colorModel = properties[kCGImagePropertyColorModel] as? String
+        return ImageDetails(dimensions: "\(width.intValue) × \(height.intValue) pixels", colorModel: colorModel)
+    }
 }

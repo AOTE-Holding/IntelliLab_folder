@@ -76,6 +76,28 @@ private func temporaryDirectory() throws -> URL {
     #expect(report.succeeded.first?.destination?.lastPathComponent == "Untitled Folder (2)")
 }
 
+@Test func cancellingParallelDuplicateKeepsEveryItemAccountedFor() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let sources = ["first.txt", "second.txt"].map { root.appendingPathComponent($0) }
+    for source in sources { try Data("content".utf8).write(to: source) }
+
+    let operation = Task {
+        await FileOperationService().duplicate(sources) { progress in
+            if progress.completed == 0 {
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+    }
+    let report = await operation.value
+
+    // Duplicates begin together. A small file may finish before cancellation
+    // reaches the task group, but no selected item may disappear from the report.
+    #expect(report.results.count == sources.count)
+    #expect(Set(report.results.map(\.source)) == Set(sources))
+    #expect(report.results.allSatisfy { $0.outcome == .succeeded || $0.outcome == .cancelled })
+}
+
 @Test func compressionCreatesOneValidatedArchiveForMultipleItems() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -112,8 +134,9 @@ private func temporaryDirectory() throws -> URL {
     try setExtendedAttribute(expectedExtendedAttribute, named: "com.intellilab.folder.rotation-test", at: source)
     let sourcePixels = try decodedPixelBytes(at: source)
 
-    let rotated = try SafeImageRotator.rotateCopy(at: source, quarterTurns: 1)
-    let properties = try imageProperties(at: rotated)
+    let rotated = try SafeImageRotator.rotateInPlace(at: source, quarterTurns: 1)
+    #expect(rotated == source)
+    let properties = try imageProperties(at: source)
     let tiff = try #require(properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any])
     let exif = try #require(properties[kCGImagePropertyExifDictionary] as? [CFString: Any])
     let gps = try #require(properties[kCGImagePropertyGPSDictionary] as? [CFString: Any])
@@ -122,14 +145,13 @@ private func temporaryDirectory() throws -> URL {
     #expect(tiff[kCGImagePropertyTIFFArtist] as? String == "IntelliLab Metadata Test")
     #expect(exif[kCGImagePropertyExifUserComment] as? String == "Preserve this exact comment")
     #expect((gps[kCGImagePropertyGPSLatitude] as? NSNumber)?.doubleValue == 47.3769)
-    #expect(try decodedPixelBytes(at: rotated) == sourcePixels)
+    #expect(try decodedPixelBytes(at: source) == sourcePixels)
 
-    let sourceAttributes = try FileManager.default.attributesOfItem(atPath: source.path)
-    let rotatedAttributes = try FileManager.default.attributesOfItem(atPath: rotated.path)
-    #expect(sourceAttributes[.creationDate] as? Date == rotatedAttributes[.creationDate] as? Date)
-    #expect(sourceAttributes[.modificationDate] as? Date == rotatedAttributes[.modificationDate] as? Date)
-    #expect(sourceAttributes[.posixPermissions] as? NSNumber == rotatedAttributes[.posixPermissions] as? NSNumber)
-    #expect(try extendedAttribute(named: "com.intellilab.folder.rotation-test", at: rotated) == expectedExtendedAttribute)
+    let rotatedAttributes = try FileManager.default.attributesOfItem(atPath: source.path)
+    #expect(rotatedAttributes[.creationDate] as? Date == fixedDate)
+    #expect(rotatedAttributes[.modificationDate] as? Date == fixedDate)
+    #expect(rotatedAttributes[.posixPermissions] as? NSNumber == 0o640)
+    #expect(try extendedAttribute(named: "com.intellilab.folder.rotation-test", at: source) == expectedExtendedAttribute)
 }
 
 @Test func rotationComposesEveryExifOrientationWithoutTouchingPixels() {

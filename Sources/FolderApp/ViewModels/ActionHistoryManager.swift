@@ -36,7 +36,7 @@ final class ActionHistoryManager: ObservableObject {
     private let service = FileOperationService.shared
     private let settingsManager = SettingsManager.shared
 
-    private init() {}
+    init() {}
 
     func record(_ action: FileAction) {
         guard FileOperationPolicy.isEnabled, settingsManager.settings.undoRedoEnabled, !action.isEmpty else { return }

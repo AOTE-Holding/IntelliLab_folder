@@ -12,6 +12,14 @@ private func makeTempFile() throws -> (url: URL, cleanup: () -> Void) {
     return (datei, { try? FileManager.default.removeItem(at: ordner) })
 }
 
+@Test func missingFileCannotSilentlyAcceptColorTag() throws {
+    let missing = FileManager.default.temporaryDirectory
+        .appendingPathComponent("MissingTagTarget-\(UUID().uuidString)")
+    #expect(throws: (any Error).self) {
+        try FinderTagService.setColorTag(.red, for: missing)
+    }
+}
+
 /// Ein gesetzter Tag muss auf der Datei landen und von dort wieder lesbar sein.
 @Test func aColorTagIsWrittenToTheFileAndReadBack() throws {
     let (datei, cleanup) = try makeTempFile()

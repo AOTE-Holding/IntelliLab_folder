@@ -73,7 +73,16 @@ struct FileSystemItem: Identifiable, Codable, Equatable, Hashable, Sendable {
         ])
 
         self.colorTag = FinderTagService.color(forLabelNumber: resourceValues.labelNumber)
-        self.isPackage = resourceValues.isPackage ?? false
+        // Launch Services can fail to classify package extensions in a fresh
+        // user account or test process. Recognize the common document bundles
+        // so search never descends into their internal files.
+        let knownPackageExtensions: Set<String> = [
+            "app", "bundle", "framework", "appex", "plugin",
+            "photoslibrary", "photolibrary", "xcodeproj", "xcworkspace",
+            "playground", "pages", "numbers", "key"
+        ]
+        self.isPackage = resourceValues.isDirectory == true &&
+            (resourceValues.isPackage == true || knownPackageExtensions.contains(url.pathExtension.lowercased()))
 
         // Determine type
         if resourceValues.isSymbolicLink == true {

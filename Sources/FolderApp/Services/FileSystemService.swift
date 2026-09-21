@@ -17,7 +17,11 @@ final class FileSystemService: @unchecked Sendable {
     // MARK: - Directory Reading
 
     /// Read contents of a directory and return FileSystemItems
-    func contentsOfDirectory(at url: URL, showHidden: Bool = false) throws -> [FileSystemItem] {
+    func contentsOfDirectory(
+        at url: URL,
+        showHidden: Bool = false,
+        ignoreDSStoreFiles: Bool = true
+    ) throws -> [FileSystemItem] {
         var items: [FileSystemItem] = []
 
         let contents = try fileManager.contentsOfDirectory(
@@ -38,6 +42,9 @@ final class FileSystemService: @unchecked Sendable {
         )
 
         for itemURL in contents {
+            if ignoreDSStoreFiles, itemURL.lastPathComponent == ".DS_Store" {
+                continue
+            }
             // Skip hidden files if not showing them
             if !showHidden {
                 let resourceValues = try itemURL.resourceValues(forKeys: [.isHiddenKey])

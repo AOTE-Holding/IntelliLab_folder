@@ -93,7 +93,7 @@ enum FinderTagService {
     /// nur der farbige. Alles andere wäre stiller Datenverlust an einer Stelle,
     /// an der niemand damit rechnet.
     static func setColorTag(_ color: ColorTag.TagColor?, for url: URL) throws {
-        let bisherige = rawTagNames(for: url)
+        let bisherige = try checkedRawTagNames(for: url)
         var neue = bisherige.filter { !isStandardColorName($0) }
 
         if let color {
@@ -102,6 +102,16 @@ enum FinderTagService {
 
         try NSURL(fileURLWithPath: url.path)
             .setResourceValue(neue as NSArray, forKey: .tagNamesKey)
+
+        // Some volumes accept the resource-value call but cannot persist the
+        // Finder metadata. Report that failure instead of showing success.
+        let actual = try checkedLabelNumber(for: url)
+        guard (actual ?? 0) == (color?.labelNumber ?? 0) else {
+            throw NSError(
+                domain: "FolderApp.FinderTag", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The volume did not save the Finder color tag."]
+            )
+        }
     }
 
     // MARK: - Innereien
@@ -114,6 +124,22 @@ enum FinderTagService {
     /// Zugriff ein frisches Objekt mit geleertem Puffer.
     static func rawTagNames(for url: URL) -> [String] {
         read(.tagNamesKey, from: url) as? [String] ?? []
+    }
+
+    private static func checkedRawTagNames(for url: URL) throws -> [String] {
+        let fresh = NSURL(fileURLWithPath: url.path)
+        fresh.removeAllCachedResourceValues()
+        var value: AnyObject?
+        try fresh.getResourceValue(&value, forKey: .tagNamesKey)
+        return value as? [String] ?? []
+    }
+
+    private static func checkedLabelNumber(for url: URL) throws -> Int? {
+        let fresh = NSURL(fileURLWithPath: url.path)
+        fresh.removeAllCachedResourceValues()
+        var value: AnyObject?
+        try fresh.getResourceValue(&value, forKey: .labelNumberKey)
+        return value as? Int
     }
 
     static func labelNumber(for url: URL) -> Int? {

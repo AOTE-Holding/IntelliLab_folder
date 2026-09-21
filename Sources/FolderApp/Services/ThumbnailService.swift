@@ -14,6 +14,11 @@ class ThumbnailService: ObservableObject {
 
     // Cache for generated thumbnails
     private let cache = NSCache<NSString, NSImage>()
+    /// Advances whenever a file has been changed in place. Including this in
+    /// the cache key prevents an in-flight old decode from being reused after
+    /// a rotation has completed.
+    @Published private(set) var cacheGeneration: UInt = 0
+    @Published private(set) var invalidatedThumbnailPath: String?
 
     // Supported image formats
     private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "heic", "heif", "webp", "ico", "icns"]
@@ -39,7 +44,8 @@ class ThumbnailService: ObservableObject {
     ///   - size: Desired thumbnail size
     /// - Returns: Thumbnail image or nil if generation fails
     func getThumbnail(for path: String, size: CGSize) async -> NSImage? {
-        let cacheKey = "\(path)_\(Int(size.width))x\(Int(size.height))" as NSString
+        let generation = cacheGeneration
+        let cacheKey = "\(generation)_\(path)_\(Int(size.width))x\(Int(size.height))" as NSString
 
         // Check cache first
         if let cachedImage = cache.object(forKey: cacheKey) {
@@ -88,7 +94,10 @@ class ThumbnailService: ObservableObject {
             return SendableCGImage(value: cgImage)
         }.value
         guard let image else { return nil }
-        return NSImage(cgImage: image.value, size: size)
+        return NSImage(
+            cgImage: image.value,
+            size: NSSize(width: image.value.width, height: image.value.height)
+        )
     }
 
     /// Generate thumbnail using Quick Look Thumbnailing service
@@ -110,7 +119,10 @@ class ThumbnailService: ObservableObject {
             }
         }
         guard let image else { return nil }
-        return NSImage(cgImage: image.value, size: size)
+        return NSImage(
+            cgImage: image.value,
+            size: NSSize(width: image.value.width, height: image.value.height)
+        )
     }
 
     /// Generate thumbnail using Quick Look Thumbnailing service (path version)
@@ -122,5 +134,14 @@ class ThumbnailService: ObservableObject {
     /// Clear the thumbnail cache
     func clearCache() {
         cache.removeAllObjects()
+    }
+
+    /// Invalidates a changed file immediately. Existing views observe the
+    /// generation and request a fresh thumbnail without needing to be closed,
+    /// reselected or recreated.
+    func invalidateThumbnail(for path: String) {
+        cache.removeAllObjects()
+        cacheGeneration &+= 1
+        invalidatedThumbnailPath = URL(fileURLWithPath: path).standardizedFileURL.path
     }
 }

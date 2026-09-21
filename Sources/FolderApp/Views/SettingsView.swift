@@ -16,6 +16,7 @@ struct SettingsView: View {
     @StateObject private var folderDefaultHandlerService = FolderDefaultHandlerService.shared
     @State private var showingMakeFolderDefaultConfirmation = false
     @State private var showingRestoreFolderHandlerConfirmation = false
+    @State private var showingPermissionsResetConfirmation = false
     @StateObject private var navigation = SettingsNavigation.shared
 
     var body: some View {
@@ -26,12 +27,6 @@ struct SettingsView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
-                Button(action: { dismiss() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
             }
             .padding(.bottom, 12)
 
@@ -67,6 +62,11 @@ struct SettingsView: View {
                 // File Display Settings
                 Section(header: Text("Files").font(.headline)) {
                     Toggle("Show Hidden Files", isOn: $settingsManager.settings.showHiddenFiles)
+                    Toggle("Ignore .DS_Store Files", isOn: $settingsManager.settings.ignoreDSStoreFiles)
+                    Text(".DS_Store is a macOS file that stores folder view settings, such as icon positions and sorting.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Toggle("Enable Undo/Redo (Cmd+Z / Cmd+Shift+Z)", isOn: $settingsManager.settings.undoRedoEnabled)
                 }
 
@@ -104,6 +104,19 @@ struct SettingsView: View {
                         .padding(.leading, 20)
 
                         Text("Use \(settingsManager.settings.keyboardShortcuts.navigationModifier.rawValue)+Arrow keys to navigate folders")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .padding(.leading, 20)
+
+                        if settingsManager.settings.keyboardShortcuts.navigationModifier == .control {
+                            Text("Control+Arrow keys may be reserved by macOS. Disable the matching shortcut in System Settings → Keyboard → Keyboard Shortcuts so Folder can use it.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.leading, 20)
+                        }
+
+                        Text("Works when the file browser has focus. In search or path fields, arrow keys edit text.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .padding(.leading, 20)
@@ -156,11 +169,14 @@ struct SettingsView: View {
                                 Text("Modifiers:")
                                     .font(.subheadline)
                                 HStack(spacing: 16) {
-                                    ModifierToggle(label: "Command", symbol: "⌘", modifier: .command, modifiers: $settingsManager.settings.globalHotkey.modifiers)
-                                    ModifierToggle(label: "Control", symbol: "⌃", modifier: .control, modifiers: $settingsManager.settings.globalHotkey.modifiers)
-                                    ModifierToggle(label: "Option", symbol: "⌥", modifier: .option, modifiers: $settingsManager.settings.globalHotkey.modifiers)
-                                    ModifierToggle(label: "Shift", symbol: "⇧", modifier: .shift, modifiers: $settingsManager.settings.globalHotkey.modifiers)
+                                    ModifierToggle(label: "Command", symbol: "⌘", modifier: .command, hotkey: $settingsManager.settings.globalHotkey)
+                                    ModifierToggle(label: "Control", symbol: "⌃", modifier: .control, hotkey: $settingsManager.settings.globalHotkey)
+                                    ModifierToggle(label: "Option", symbol: "⌥", modifier: .option, hotkey: $settingsManager.settings.globalHotkey)
+                                    ModifierToggle(label: "Shift", symbol: "⇧", modifier: .shift, hotkey: $settingsManager.settings.globalHotkey)
                                 }
+                                Text("At least one modifier is required.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
 
                             Text("Activates Folder from anywhere on your system")
@@ -256,14 +272,10 @@ struct SettingsView: View {
 
             Divider()
 
-            // Footer with buttons
             HStack {
-                Button("Reset to Defaults") {
-                    // A reset must reset the real Login Item as well, not
-                    // merely the saved toggle shown in this window.
-                    loginItemService.setEnabled(false)
-                    settingsManager.reset()
-                    loginItemService.refresh()
+                Button("Reset to Defaults", role: .destructive) {
+                    PermissionCenter.shared.resetStoredPermissions()
+                    showingPermissionsResetConfirmation = true
                 }
                 .buttonStyle(.bordered)
 
@@ -306,6 +318,14 @@ struct SettingsView: View {
         } message: {
             Text("Folder will no longer be the default app for opening directories.")
         }
+        .alert("Permissions Reset", isPresented: $showingPermissionsResetConfirmation) {
+            Button("Open Full Disk Access Settings") {
+                PermissionCenter.shared.openSystemSettings(for: .fullDiskAccess)
+            }
+            Button("Done", role: .cancel) {}
+        } message: {
+            Text("Folder's saved folder and automation permissions were reset. Full Disk Access is managed by macOS; turn off Folder there to revoke that system permission.")
+        }
         .alert("Folder Default App", isPresented: Binding(
             get: { folderDefaultHandlerService.errorMessage != nil },
             set: { if !$0 { folderDefaultHandlerService.clearError() } }
@@ -336,20 +356,14 @@ struct ModifierToggle: View {
     let label: String
     let symbol: String
     let modifier: GlobalHotkey.KeyModifier
-    @Binding var modifiers: [GlobalHotkey.KeyModifier]
+    @Binding var hotkey: GlobalHotkey
 
     private var isEnabled: Bool {
-        modifiers.contains(modifier)
+        hotkey.modifiers.contains(modifier)
     }
 
     var body: some View {
-        Button(action: {
-            if isEnabled {
-                modifiers.removeAll { $0 == modifier }
-            } else {
-                modifiers.append(modifier)
-            }
-        }) {
+        Button(action: { hotkey.toggleModifier(modifier) }) {
             HStack(spacing: 4) {
                 Text(symbol)
                     .font(.system(size: 14, design: .monospaced))
@@ -366,6 +380,7 @@ struct ModifierToggle: View {
             )
         }
         .buttonStyle(.plain)
+        .disabled(isEnabled && hotkey.modifiers.count == 1)
     }
 
 }

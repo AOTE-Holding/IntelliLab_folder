@@ -75,9 +75,9 @@ class IconService: ObservableObject {
         let pfad = item.path.path
         let geladen = await Task.detached(priority: .userInitiated) {
             SendableImage(value: NSWorkspace.shared.icon(forFile: pfad))
-        }.value
+        }.value.value
 
-        let fertig = Self.sized(geladen.value, to: size)
+        let fertig = Self.sized(geladen, to: size)
         imageCache.setObject(fertig, forKey: key)
         return fertig
     }
@@ -116,5 +116,5 @@ class IconService: ObservableObject {
         kopie.size = NSSize(width: size, height: size)
         return kopie
     }
-}
 
+}

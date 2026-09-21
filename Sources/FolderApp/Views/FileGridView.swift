@@ -117,7 +117,7 @@ struct FileGridView: View {
             FileGridItemWithRename(
                 item: item,
                 isSelected: viewModel.isSelected(item),
-                isRenaming: false,
+                isRenaming: viewModel.renamingItem == item.id,
                 clipboardManager: clipboardManager,
                 isDimmed: showDimmed,
                 viewModel: viewModel,
@@ -141,7 +141,8 @@ struct FileGridView: View {
                     )
             }
             .overlay {
-                Color.clear.multiFileDrag(
+                if viewModel.renamingItem != item.id {
+                    Color.clear.multiFileDrag(
                     urls: viewModel.isSelected(item)
                         ? viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map { $0.path }
                         : [item.path],
@@ -156,7 +157,9 @@ struct FileGridView: View {
                     onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
                     onDoubleClick: { handleDoubleClick(item) },
                     onColorTagDrop: { farbe in
-                        viewModel.applyColorTag(farbe, to: tagDropTargets(for: item))
+                        viewModel.applyColorTag(farbe, to: tagDropTargets(for: item)) { [weak searchViewModel] in
+                            searchViewModel?.refreshTagsIfNeeded()
+                        }
                     },
                     onColorTagHover: { aktiv in
                         if aktiv {
@@ -165,7 +168,8 @@ struct FileGridView: View {
                             tagDropTargetID = nil
                         }
                     }
-                )
+                    )
+                }
             }
             .contextMenu {
                 FileContextMenu(item: item, viewModel: viewModel, clipboardManager: clipboardManager)
@@ -300,7 +304,7 @@ struct FileGridItemWithRename: View {
                     if let thumbnail = thumbnail {
                         Image(nsImage: thumbnail)
                             .resizable()
-                            .aspectRatio(contentMode: .fill)
+                            .aspectRatio(contentMode: .fit)
                             .frame(width: CGFloat(viewModel.viewMode.iconSize), height: CGFloat(viewModel.viewMode.iconSize))
                             .clipShape(RoundedRectangle(cornerRadius: 4))
                     } else {
@@ -327,7 +331,7 @@ struct FileGridItemWithRename: View {
                     renamingFocusedID = nil
                 }
                 .onAppear {
-                    renamingFocusedID = item.id
+                    focusRenameField()
                 }
             }
             .padding(8)
@@ -358,6 +362,25 @@ struct FileGridItemWithRename: View {
         } else {
             // Normal display mode
             FileGridItem(item: item, isSelected: isSelected, clipboardManager: clipboardManager, isDimmed: isDimmed, iconSize: CGFloat(viewModel.viewMode.iconSize))
+        }
+    }
+
+    /// Finder markiert beim Umbenennen einer Datei nur den Namen vor der
+    /// letzten Endung. Die Endung bleibt dabei editierbar. Punktdateien wie
+    /// `.DS_Store` behalten den vollständigen Namen als Auswahl.
+    private func focusRenameField() {
+        renamingFocusedID = item.id
+
+        let name = item.name as NSString
+        let lastDot = name.range(of: ".", options: .backwards)
+        let selectedLength = item.type == .file && lastDot.location > 0
+            ? lastDot.location
+            : name.length
+
+        DispatchQueue.main.async {
+            guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView,
+                  editor.string == item.name else { return }
+            editor.setSelectedRange(NSRange(location: 0, length: selectedLength))
         }
     }
 }
@@ -407,7 +430,7 @@ struct FileGridItem: View {
                     // Show thumbnail preview
                     Image(nsImage: thumbnail)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                            .aspectRatio(contentMode: .fit)
                         .frame(width: iconSize, height: iconSize)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 } else {
@@ -475,11 +498,24 @@ struct FileGridItem: View {
                 icon = geladen
             }
 
-            // Load thumbnail for images and PDFs
-            if thumbnailService.supportsThumbnail(for: item.path.path) {
-                thumbnail = await thumbnailService.getThumbnail(for: item.path.path, size: CGSize(width: 128, height: 128))
-            }
+            await loadThumbnail()
         }
+        .onChange(of: thumbnailService.cacheGeneration) { _ in
+            guard thumbnailService.invalidatedThumbnailPath == item.path.standardizedFileURL.path else { return }
+            Task { await loadThumbnail() }
+        }
+    }
+
+    @MainActor
+    private func loadThumbnail() async {
+        guard thumbnailService.supportsThumbnail(for: item.path.path) else { return }
+        let generation = thumbnailService.cacheGeneration
+        let image = await thumbnailService.getThumbnail(
+            for: item.path.path,
+            size: CGSize(width: 128, height: 128)
+        )
+        guard generation == thumbnailService.cacheGeneration else { return }
+        thumbnail = image
     }
 }
 
@@ -495,12 +531,19 @@ struct FileContextMenu: View {
     @StateObject private var sidebarManager = SidebarManager.shared
     @StateObject private var settingsManager = SettingsManager.shared
     @StateObject private var operationCoordinator = FileOperationCoordinator.shared
-    @State private var showingRenameAlert = false
-    @State private var newName = ""
+    @State private var showingSearchRenameAlert = false
+    @State private var searchRenameText = ""
 
     private var effectiveItems: [FileSystemItem] { allItems ?? viewModel.items }
     private var effectiveSelectedIDs: Set<UUID> { selectedItemIDs ?? viewModel.selectedItems }
     private var isItemSelected: Bool { effectiveSelectedIDs.contains(item.id) }
+
+    /// Kontextaktionen beziehen sich auf die Auswahl, wenn das angeklickte
+    /// Element Teil davon ist. Einzeldateiaktionen bleiben bei einer
+    /// Mehrfachauswahl bewusst gesperrt.
+    private var operationItemCount: Int {
+        isItemSelected ? effectiveSelectedIDs.count : 1
+    }
 
     private let imageExtensions = SafeImageRotator.supportedExtensions
 
@@ -599,9 +642,14 @@ struct FileContextMenu: View {
         Button("Compress") { compressItems() }
 
         if isImageFile {
-            Menu("Rotate Image") {
-                Button("Rotate Left (90°)") { rotateImage(degrees: -90) }
-                Button("Rotate Right (90°)") { rotateImage(degrees: 90) }
+            if operationItemCount == 1 {
+                Menu("Rotate Image") {
+                    Button("Rotate Left (90°)") { rotateImage(degrees: -90) }
+                    Button("Rotate Right (90°)") { rotateImage(degrees: 90) }
+                }
+            } else {
+                Button("Rotate Image") {}
+                    .disabled(true)
             }
         }
 
@@ -631,8 +679,20 @@ struct FileContextMenu: View {
         Button("Move to Trash", role: .destructive) { moveToTrash() }
 
         Button("Rename…") {
-            newName = item.name
-            showingRenameAlert = true
+            if searchViewModel == nil {
+                viewModel.startRenaming(item)
+            } else {
+                searchRenameText = item.name
+                showingSearchRenameAlert = true
+            }
+        }
+        .disabled(operationItemCount != 1 || !FileDropValidation.canWrite(to: item.path.deletingLastPathComponent()))
+        .alert("Rename", isPresented: $showingSearchRenameAlert) {
+            TextField("New Name", text: $searchRenameText)
+            Button("Rename") {
+                viewModel.renameItem(item, to: searchRenameText)
+            }
+            Button("Cancel", role: .cancel) {}
         }
 
         Divider()
@@ -640,17 +700,6 @@ struct FileContextMenu: View {
         Button("Add to Favorites") {
             sidebarManager.addFavorite(item.path, name: item.name, icon: item.type == .folder ? "folder.fill" : "doc.fill")
         }
-        .background(
-            EmptyView()
-                .alert("Rename", isPresented: $showingRenameAlert) {
-                    TextField("New Name", text: $newName)
-                    Button("Rename") {
-                        guard !newName.isEmpty else { return }
-                        viewModel.renameItem(item, to: newName)
-                    }
-                    Button("Cancel", role: .cancel) { }
-                }
-        )
     }
 
     private func moveToTrash() {
@@ -672,8 +721,9 @@ struct FileContextMenu: View {
             ? effectiveItems.filter { effectiveSelectedIDs.contains($0.id) }
             : [item]
 
-        viewModel.applyColorTag(color, to: ziele)
-        searchViewModel?.refreshTagsIfNeeded()
+        viewModel.applyColorTag(color, to: ziele) { [weak searchViewModel] in
+            searchViewModel?.refreshTagsIfNeeded()
+        }
     }
 
     private func openWith(appURL: URL) {
@@ -727,6 +777,7 @@ struct FileContextMenu: View {
     }
 
     private func rotateImage(degrees: CGFloat) {
-        operationCoordinator.rotateCopy(item.path, quarterTurns: Int((degrees / 90).rounded()))
+        guard operationItemCount == 1 else { return }
+        operationCoordinator.rotate(item.path, quarterTurns: Int((degrees / 90).rounded()))
     }
 }

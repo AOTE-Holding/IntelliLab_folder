@@ -74,6 +74,12 @@ enum FileDropValidation {
 final class FileOperationCoordinator: ObservableObject {
     static let shared = FileOperationCoordinator()
 
+    struct TransferProgressSample: Identifiable {
+        let id = UUID()
+        let timestamp: Date
+        let itemsPerSecond: Double
+    }
+
     struct PendingConflict: Identifiable {
         let id = UUID()
         let destination: URL
@@ -91,7 +97,13 @@ final class FileOperationCoordinator: ObservableObject {
     }
 
     @Published private(set) var isProcessing = false
+    @Published private(set) var isProgressPresentationVisible = false
+    @Published private(set) var isProgressPresentationMinimized = false
+    @Published private(set) var isCancellationRequested = false
     @Published private(set) var progress: FileOperationProgress?
+    @Published private(set) var transferProgressSamples: [TransferProgressSample] = []
+    @Published private(set) var operationStartedAt: Date?
+    @Published private(set) var progressPresentationOffset = CGSize.zero
     @Published var pendingConflict: PendingConflict?
     @Published var presentedReport: PresentedReport?
     @Published var pendingTrash: PendingTrash?
@@ -99,6 +111,12 @@ final class FileOperationCoordinator: ObservableObject {
     private let service: FileOperationService
     private let clipboard: ClipboardManager
     private var operationTask: Task<Void, Never>?
+    private var progressPresentationTask: Task<Void, Never>?
+    private let progressPresentationDelay: UInt64 = 600_000_000
+    private var lastProgressSampleAt: Date?
+    private var lastProgressSampleCompleted = 0
+    private let transferGraphWindow: TimeInterval = 10
+    private let minimumSampleInterval: TimeInterval = 0.12
 
     init(
         service: FileOperationService = .shared,
@@ -108,15 +126,38 @@ final class FileOperationCoordinator: ObservableObject {
         self.clipboard = clipboard ?? .shared
     }
 
+    /// Minimiert ausschliesslich das Fortschrittsfenster. Die Dateioperation
+    /// läuft weiter und bleibt über die kleine Fortschrittsanzeige erreichbar.
+    func minimizeProgressPresentation() {
+        guard isProcessing else { return }
+        isProgressPresentationMinimized = true
+    }
+
+    func restoreProgressPresentation() {
+        guard isProcessing else { return }
+        isProgressPresentationMinimized = false
+    }
+
+    /// Speichert die Position erst nach Ende des Ziehens. Dadurch bleibt das
+    /// Fenster nach dem Minimieren an derselben Stelle, ohne beim Ziehen die
+    /// Ansicht bei jedem Pointer-Update neu zu zeichnen.
+    func moveProgressPresentation(by translation: CGSize) {
+        progressPresentationOffset = CGSize(
+            width: progressPresentationOffset.width + translation.width,
+            height: progressPresentationOffset.height + translation.height
+        )
+    }
+
     func paste(to destination: URL) {
         guard FileOperationPolicy.isEnabled else { return }
         start {
             do {
-                let result = try await self.clipboard.paste(to: destination)
+                let result = try await self.clipboard.paste(to: destination, progress: self.progressHandler)
                 if result.hasConflicts {
                     let resolved = try await self.clipboard.pasteWithResolution(
                         to: destination,
-                        conflictResolution: .keepBoth
+                        conflictResolution: .keepBoth,
+                        progress: self.progressHandler
                     )
                     self.present(result: resolved)
                     return
@@ -137,7 +178,8 @@ final class FileOperationCoordinator: ObservableObject {
             do {
                 let result = try await self.clipboard.pasteWithResolution(
                     to: pending.destination,
-                    conflictResolution: resolution
+                    conflictResolution: resolution,
+                    progress: self.progressHandler
                 )
                 self.present(result: result)
             } catch {
@@ -261,16 +303,25 @@ final class FileOperationCoordinator: ObservableObject {
         }
     }
 
-    func rotateCopy(_ source: URL, quarterTurns: Int) {
+    func rotate(_ source: URL, quarterTurns: Int) {
         guard FileOperationPolicy.isEnabled else { return }
         start {
             let access = PermissionCenter.shared.beginAccess(to: source)
             defer { access?.stop() }
-            self.finish(await self.service.rotateCopy(source, quarterTurns: quarterTurns))
+            let report = await self.service.rotate(source, quarterTurns: quarterTurns)
+
+            // Die Datei bleibt am gleichen Pfad. Thumbnails sind ebenfalls
+            // nach Pfad gepuffert und würden sonst das Bild vor der Rotation
+            // zeigen, obwohl die neue Datei bereits auf der Platte liegt.
+            if !report.succeeded.isEmpty {
+                ThumbnailService.shared.invalidateThumbnail(for: source.path)
+                QuickLookManager.shared.refreshPreview(for: source)
+            }
+            self.finish(report)
         }
     }
 
-    func rename(_ source: URL, to newName: String) {
+    func rename(_ source: URL, to newName: String, completion: ((URL?) -> Void)? = nil) {
         guard FileOperationPolicy.isEnabled else { return }
         start {
             let access = PermissionCenter.shared.beginAccess(to: source)
@@ -285,6 +336,7 @@ final class FileOperationCoordinator: ObservableObject {
                 ))
             }
             self.finish(report)
+            completion?(succeeded.first?.destination)
         }
     }
 
@@ -300,6 +352,8 @@ final class FileOperationCoordinator: ObservableObject {
     }
 
     func cancel() {
+        guard isProcessing else { return }
+        isCancellationRequested = true
         operationTask?.cancel()
     }
 
@@ -309,21 +363,71 @@ final class FileOperationCoordinator: ObservableObject {
     }
 
     private var progressHandler: FileOperationService.ProgressHandler {
-        { value in
-            await MainActor.run { FileOperationCoordinator.shared.progress = value }
+        { [weak self] value in
+            await self?.setProgress(value)
         }
+    }
+
+    private func setProgress(_ value: FileOperationProgress) {
+        progress = value
+        let now = Date()
+        guard let lastSampleAt = lastProgressSampleAt else {
+            lastProgressSampleAt = now
+            lastProgressSampleCompleted = value.completed
+            return
+        }
+
+        let elapsed = now.timeIntervalSince(lastSampleAt)
+        let completedSinceLastSample = value.completed - lastProgressSampleCompleted
+        guard elapsed >= minimumSampleInterval, completedSinceLastSample > 0 else { return }
+        transferProgressSamples.append(
+            TransferProgressSample(
+                timestamp: now,
+                itemsPerSecond: Double(completedSinceLastSample) / elapsed
+            )
+        )
+        lastProgressSampleAt = now
+        lastProgressSampleCompleted = value.completed
+        transferProgressSamples.removeAll { now.timeIntervalSince($0.timestamp) > transferGraphWindow }
     }
 
     private func start(_ operation: @escaping @MainActor () async -> Void) {
         guard !isProcessing else { return }
         isProcessing = true
+        isProgressPresentationVisible = false
+        isProgressPresentationMinimized = false
+        isCancellationRequested = false
         progress = nil
+        transferProgressSamples = []
+        operationStartedAt = Date()
+        progressPresentationOffset = .zero
+        lastProgressSampleAt = nil
+        lastProgressSampleCompleted = 0
+        progressPresentationTask?.cancel()
+        progressPresentationTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: self?.progressPresentationDelay ?? 600_000_000)
+            } catch {
+                return
+            }
+            guard let self, self.isProcessing, !Task.isCancelled else { return }
+            self.isProgressPresentationVisible = true
+        }
         operationTask = Task { [weak self] in
             await operation()
             guard let self else { return }
             self.isProcessing = false
+            self.isProgressPresentationVisible = false
+            self.isProgressPresentationMinimized = false
+            self.isCancellationRequested = false
             self.progress = nil
+            self.operationStartedAt = nil
+            self.progressPresentationOffset = .zero
+            self.lastProgressSampleAt = nil
+            self.lastProgressSampleCompleted = 0
             self.operationTask = nil
+            self.progressPresentationTask?.cancel()
+            self.progressPresentationTask = nil
         }
     }
 
@@ -355,26 +459,39 @@ final class FileOperationCoordinator: ObservableObject {
                 replacedItemInTrash: nil
             )
         }
+        let cancelled = result.cancelled.map {
+            FileOperationItemResult(
+                source: $0,
+                destination: nil,
+                outcome: .cancelled,
+                message: "Operation cancelled.",
+                replacedItemInTrash: nil
+            )
+        }
         finish(FileOperationReport(
             kind: result.actionType == .cut ? .move : .copy,
-            results: successes + failures + skipped
+            results: successes + failures + skipped + cancelled
         ))
     }
 
     private func present(error: Error, kind: FileOperationKind) {
+        let cancelled = error is CancellationError || Task.isCancelled
         finish(FileOperationReport(kind: kind, results: [
             FileOperationItemResult(
                 source: URL(fileURLWithPath: "/"),
                 destination: nil,
-                outcome: .failed,
-                message: error.localizedDescription,
+                outcome: cancelled ? .cancelled : .failed,
+                message: cancelled ? "Operation cancelled." : error.localizedDescription,
                 replacedItemInTrash: nil
             )
         ]))
     }
 
     private func finish(_ report: FileOperationReport) {
-        presentedReport = PresentedReport(report: report)
+        // A completed operation is reflected by the refreshed file browser.
+        // Reserve the modal result view for actual failures, where the user
+        // needs the per-item error and a way to reveal the affected item.
+        presentedReport = report.failed.isEmpty ? nil : PresentedReport(report: report)
         NotificationCenter.default.post(name: .fileOperationDidFinish, object: report)
     }
 }

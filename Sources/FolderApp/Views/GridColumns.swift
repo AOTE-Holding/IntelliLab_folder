@@ -30,10 +30,12 @@ enum GridColumnMath {
     /// Das `.padding()` um das Gitter — links und rechts je der Standardwert.
     static let contentPadding: CGFloat = 16
 
-    /// Die Mindestbreite einer Kachel, wie sie `GridItem(.adaptive(minimum:))`
-    /// bekommt: Symbolgrösse plus Platz für den Dateinamen.
+    /// Die Mindestbreite einer vollständigen Kachel inklusive ihres äußeren
+    /// Acht-Punkt-Abstands auf beiden Seiten. Der Auswahlrahmen wird um diese
+    /// volle Zelle gezeichnet; ohne die 16 Punkte liefen ausgewählte Rahmen
+    /// ineinander, obwohl das Raster selbst einen Abstand hatte.
     static func itemMinimum(iconSize: Int) -> CGFloat {
-        CGFloat(iconSize + 40)
+        CGFloat(iconSize + 40 + 16)
     }
 
     /// Dieselbe Regel, nach der SwiftUI `.adaptive` auflöst: es passen so viele

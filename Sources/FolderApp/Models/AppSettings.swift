@@ -10,6 +10,9 @@ import Foundation
 struct AppSettings: Codable {
     var defaultViewMode: DisplayMode
     var showHiddenFiles: Bool
+    /// Keeps Finder metadata out of normal file browsing even when hidden
+    /// files are otherwise visible.
+    var ignoreDSStoreFiles: Bool
     var lastOpenedFolder: URL?
     var theme: Theme
     var iconSize: Int  // 32-128px
@@ -86,6 +89,7 @@ struct AppSettings: Codable {
     static let `default` = AppSettings(
         defaultViewMode: .iconGrid,
         showHiddenFiles: true,
+        ignoreDSStoreFiles: true,
         lastOpenedFolder: FileManager.default.homeDirectoryForCurrentUser,
         theme: .system,
         iconSize: 64,
@@ -125,6 +129,7 @@ extension AppSettings {
 
         defaultViewMode = lies(.defaultViewMode, standard.defaultViewMode)
         showHiddenFiles = lies(.showHiddenFiles, standard.showHiddenFiles)
+        ignoreDSStoreFiles = lies(.ignoreDSStoreFiles, standard.ignoreDSStoreFiles)
         lastOpenedFolder = lies(.lastOpenedFolder, standard.lastOpenedFolder)
         theme = lies(.theme, standard.theme)
         iconSize = lies(.iconSize, standard.iconSize)
@@ -186,7 +191,16 @@ struct KeyboardShortcuts: Codable {
 struct GlobalHotkey: Codable {
     var enabled: Bool
     var key: String
-    var modifiers: [KeyModifier]
+    var modifiers: [KeyModifier] {
+        didSet {
+            let normalized = Self.normalized(modifiers)
+            if modifiers != normalized { modifiers = normalized }
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled, key, modifiers
+    }
 
     enum KeyModifier: String, Codable, CaseIterable {
         case command = "⌘"
@@ -211,7 +225,30 @@ struct GlobalHotkey: Codable {
     ) {
         self.enabled = enabled
         self.key = key
-        self.modifiers = modifiers
+        self.modifiers = Self.normalized(modifiers)
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try values.decode(Bool.self, forKey: .enabled)
+        key = try values.decode(String.self, forKey: .key)
+        modifiers = Self.normalized(try values.decode([KeyModifier].self, forKey: .modifiers))
+    }
+
+    mutating func toggleModifier(_ modifier: KeyModifier) {
+        if modifiers.contains(modifier) {
+            guard modifiers.count > 1 else { return }
+            modifiers.removeAll { $0 == modifier }
+        } else {
+            modifiers.append(modifier)
+        }
+    }
+
+    private static func normalized(_ modifiers: [KeyModifier]) -> [KeyModifier] {
+        let unique = modifiers.reduce(into: [KeyModifier]()) { result, modifier in
+            if !result.contains(modifier) { result.append(modifier) }
+        }
+        return unique.isEmpty ? [.command] : unique
     }
 
     var displayString: String {
