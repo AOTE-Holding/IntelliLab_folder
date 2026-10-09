@@ -92,6 +92,15 @@ struct SettingsView: View {
                 Section(header: Text("Keyboard Shortcuts").font(.headline)) {
                     Toggle("Enable Search (Cmd+F)", isOn: $settingsManager.settings.keyboardShortcuts.searchEnabled)
 
+                    Picker("Delete permanently:", selection: $settingsManager.settings.keyboardShortcuts.permanentDeleteModifier) {
+                        ForEach(KeyboardShortcuts.PermanentDeleteModifier.allCases, id: \.self) { modifier in
+                            Text(modifier.displayName).tag(modifier)
+                        }
+                    }
+                    Text("Delete moves selected items to Trash. The chosen shortcut deletes them permanently. Both actions require confirmation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
                     Toggle("Enable Folder Navigation", isOn: $settingsManager.settings.keyboardShortcuts.navigationEnabled)
 
                     if settingsManager.settings.keyboardShortcuts.navigationEnabled {

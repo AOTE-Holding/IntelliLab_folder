@@ -26,6 +26,39 @@ private func temporaryDirectory() throws -> URL {
     return url
 }
 
+@Test @MainActor func deletingWaitsForConfirmation() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("keep.txt")
+    try Data("keep".utf8).write(to: file)
+    let coordinator = FileOperationCoordinator(service: FileOperationService())
+
+    coordinator.moveToTrash([file])
+    #expect(coordinator.pendingDeletion?.permanently == false)
+    #expect(FileManager.default.fileExists(atPath: file.path))
+    coordinator.cancelPendingDeletion()
+
+    coordinator.deletePermanently([file])
+    #expect(coordinator.pendingDeletion?.permanently == true)
+    #expect(FileManager.default.fileExists(atPath: file.path))
+    coordinator.cancelPendingDeletion()
+    #expect(FileManager.default.fileExists(atPath: file.path))
+}
+
+@Test func permanentDeletionRemovesTheFileWithoutTrashDestination() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("delete-me.txt")
+    try Data("temporary".utf8).write(to: file)
+
+    let report = await FileOperationService().deletePermanently([file])
+
+    #expect(report.kind == .deletePermanently)
+    #expect(report.allSucceeded)
+    #expect(report.succeeded.first?.destination == nil)
+    #expect(!FileManager.default.fileExists(atPath: file.path))
+}
+
 @Test func conflictSkipPreservesExistingDestination() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -74,6 +107,33 @@ private func temporaryDirectory() throws -> URL {
 
     #expect(report.allSucceeded)
     #expect(report.succeeded.first?.destination?.lastPathComponent == "Untitled Folder (2)")
+}
+
+@Test func createFileUsesTheEnteredExtensionAndNeverOverwritesAnExistingFile() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let service = FileOperationService()
+
+    let created = await service.createFile(in: root, named: "notes.md")
+    #expect(created.allSucceeded)
+    let file = root.appendingPathComponent("notes.md")
+    #expect(try Data(contentsOf: file).isEmpty)
+
+    try Data("keep".utf8).write(to: file)
+    let collision = await service.createFile(in: root, named: "notes.md")
+    #expect(collision.failed.count == 1)
+    #expect(try String(contentsOf: file, encoding: .utf8) == "keep")
+}
+
+@Test func createFileRequiresANameAndExtension() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    for name in ["notes", ".hidden", "notes.", "../escape.txt"] {
+        let report = await FileOperationService().createFile(in: root, named: name)
+        #expect(report.failed.count == 1)
+    }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
 }
 
 @Test func cancellingParallelDuplicateKeepsEveryItemAccountedFor() async throws {

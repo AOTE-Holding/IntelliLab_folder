@@ -16,6 +16,30 @@ enum NativeFileClickAction: Equatable {
     case none
 }
 
+enum FileNameClickRegion {
+    case grid(iconSize: CGFloat)
+    case list(name: String)
+
+    func contains(_ point: NSPoint, in bounds: NSRect, isFlipped: Bool) -> Bool {
+        let distanceFromBottom = isFlipped ? bounds.height - point.y : point.y
+        switch self {
+        case .grid(let iconSize):
+            let labelHeight = bounds.height - iconSize - 24 // icon, spacing and vertical padding
+            let labelWidth = iconSize + 40
+            return point.x >= (bounds.width - labelWidth) / 2
+                && point.x <= (bounds.width + labelWidth) / 2
+                && distanceFromBottom >= 8
+                && distanceFromBottom <= 8 + labelHeight
+        case .list(let name):
+            let textWidth = (name as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+            let availableWidth = max(0, bounds.width - 40 - 220)
+            return point.x >= 40
+                && point.x <= 40 + min(textWidth, availableWidth)
+                && abs(distanceFromBottom - bounds.height / 2) <= 12
+        }
+    }
+}
+
 /// A transparent NSView that intercepts mouse drags for multi-file drag sessions.
 /// Clicks are handled directly via callbacks instead of event re-sending,
 /// which properly supports single-click, double-click, and modifier keys.
@@ -28,6 +52,9 @@ class DraggableView: NSView, NSDraggingSource {
     var onDragExited: (() -> Void)?
     var onSingleClick: ((NSEvent.ModifierFlags) -> Void)?
     var onDoubleClick: (() -> Void)?
+    var onNameClick: (() -> Void)?
+    var nameClickRegion: FileNameClickRegion?
+    var canRenameOnNameClick: (() -> Bool)?
     var onColorTagDrop: ((ColorTag.TagColor) -> Void)?
     var onColorTagHover: ((Bool) -> Void)?
     private var dragStartPoint: NSPoint?
@@ -35,6 +62,7 @@ class DraggableView: NSView, NSDraggingSource {
     private var isHoveringDestination = false
     private var pendingSingleClickModifiers: NSEvent.ModifierFlags?
     private var activeDragURLs: [URL] = []
+    private var shouldRenameOnMouseUp = false
 
     /// Diese Ansicht liegt ueber der Kachel und faengt jedes Ziehen ab, das sie
     /// annimmt. Ein Typ, der hier fehlt, kommt deshalb nirgends mehr an — auch
@@ -71,6 +99,12 @@ class DraggableView: NSView, NSDraggingSource {
             dragStartPoint = convert(event.locationInWindow, from: nil)
             isDragging = false
             pendingSingleClickModifiers = nil
+            let point = dragStartPoint ?? .zero
+            shouldRenameOnMouseUp = event.clickCount == 1
+                && (canRenameOnNameClick?() ?? false)
+                && fileURLs.count == 1
+                && event.modifierFlags.intersection([.command, .shift, .option, .control]).isEmpty
+                && (nameClickRegion?.contains(point, in: bounds, isFlipped: isFlipped) ?? false)
             // Finder selects on the first mouse-down instead of waiting for
             // the system double-click interval to expire. The second click is
             // reserved for opening the already selected item.
@@ -126,6 +160,9 @@ class DraggableView: NSView, NSDraggingSource {
             if let pendingSingleClickModifiers {
                 onSingleClick?(pendingSingleClickModifiers)
             }
+            if shouldRenameOnMouseUp {
+                onNameClick?()
+            }
             // Selection already happened on the first mouse-down. Only the
             // second mouse-up performs the open action.
             if Self.action(forMouseUpClickCount: event.clickCount) == .open {
@@ -135,6 +172,7 @@ class DraggableView: NSView, NSDraggingSource {
         dragStartPoint = nil
         isDragging = false
         pendingSingleClickModifiers = nil
+        shouldRenameOnMouseUp = false
     }
 
     nonisolated static func action(forMouseDownClickCount clickCount: Int) -> NativeFileClickAction {
@@ -305,6 +343,9 @@ struct MultiFileDragView: NSViewRepresentable {
     let onDragExited: (() -> Void)?
     let onSingleClick: ((NSEvent.ModifierFlags) -> Void)?
     let onDoubleClick: (() -> Void)?
+    let onNameClick: (() -> Void)?
+    let nameClickRegion: FileNameClickRegion?
+    let canRenameOnNameClick: (() -> Bool)?
     let onColorTagDrop: ((ColorTag.TagColor) -> Void)?
     let onColorTagHover: ((Bool) -> Void)?
 
@@ -318,6 +359,9 @@ struct MultiFileDragView: NSViewRepresentable {
         view.onDragExited = onDragExited
         view.onSingleClick = onSingleClick
         view.onDoubleClick = onDoubleClick
+        view.onNameClick = onNameClick
+        view.nameClickRegion = nameClickRegion
+        view.canRenameOnNameClick = canRenameOnNameClick
         view.onColorTagDrop = onColorTagDrop
         view.onColorTagHover = onColorTagHover
         return view
@@ -332,6 +376,9 @@ struct MultiFileDragView: NSViewRepresentable {
         nsView.onDragExited = onDragExited
         nsView.onSingleClick = onSingleClick
         nsView.onDoubleClick = onDoubleClick
+        nsView.onNameClick = onNameClick
+        nsView.nameClickRegion = nameClickRegion
+        nsView.canRenameOnNameClick = canRenameOnNameClick
         nsView.onColorTagDrop = onColorTagDrop
         nsView.onColorTagHover = onColorTagHover
     }
@@ -348,6 +395,9 @@ extension View {
         onDragExited: (() -> Void)? = nil,
         onSingleClick: ((NSEvent.ModifierFlags) -> Void)? = nil,
         onDoubleClick: (() -> Void)? = nil,
+        onNameClick: (() -> Void)? = nil,
+        nameClickRegion: FileNameClickRegion? = nil,
+        canRenameOnNameClick: (() -> Bool)? = nil,
         onColorTagDrop: ((ColorTag.TagColor) -> Void)? = nil,
         onColorTagHover: ((Bool) -> Void)? = nil
     ) -> some View {
@@ -362,6 +412,9 @@ extension View {
                 onDragExited: onDragExited,
                 onSingleClick: onSingleClick,
                 onDoubleClick: onDoubleClick,
+                onNameClick: onNameClick,
+                nameClickRegion: nameClickRegion,
+                canRenameOnNameClick: canRenameOnNameClick,
                 onColorTagDrop: onColorTagDrop,
                 onColorTagHover: onColorTagHover
             )

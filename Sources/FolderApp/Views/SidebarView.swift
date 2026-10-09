@@ -63,7 +63,13 @@ struct SidebarView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
+            // Reserve the titlebar area outside the scrollable content so
+            // Favorites cannot move underneath the window controls.
+            Color.clear.frame(height: WindowControls.topInset)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
             favoritesSection
 
             // Devices Section - only show when devices are connected
@@ -157,15 +163,10 @@ struct SidebarView: View {
                 }
             }
 
-            Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
         }
-        // The split view owns the width. Filling that width keeps the sidebar
-        // background continuous while labels naturally truncate like Finder.
-        // Die Sidebar beginnt oben links im Fenster — genau dort, wo macOS
-        // seine Ampelknöpfe setzt. Ohne diesen Abstand lief ihr erster Eintrag
-        // unter ihnen durch. Gemessen statt angenommen: im Vollbild gibt es
-        // die Knöpfe nicht, dann ist der Abstand null.
-        .padding(.top, WindowControls.topInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.folderSidebar)
         .coordinateSpace(name: "sidebarFavoriteDropArea")

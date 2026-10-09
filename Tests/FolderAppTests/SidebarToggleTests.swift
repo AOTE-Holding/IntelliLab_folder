@@ -5,9 +5,10 @@ import Testing
 
 /// Baut eine Aufteilung wie im Fenster: Sidebar links, Inhalt rechts.
 @MainActor
-private func makeSplitView(collapsed: Binding<Bool>) -> (
+private func makeSplitView() -> (
     split: FolderNativeSplitView,
-    coordinator: NativeSidebarSplitView<Color, Color>.Coordinator
+    coordinator: NativeSidebarSplitView<Color, Color>.Coordinator,
+    presentation: SidebarPresentationState
 ) {
     let split = FolderNativeSplitView()
     split.isVertical = true
@@ -18,23 +19,21 @@ private func makeSplitView(collapsed: Binding<Bool>) -> (
     split.addSubview(sidebar)
     split.addSubview(detail)
 
+    let presentation = SidebarPresentationState()
     let coordinator = NativeSidebarSplitView<Color, Color>.Coordinator(
-        isEffectivelyCollapsed: collapsed
+        presentation: presentation
     )
     split.delegate = coordinator
     split.setPosition(200, ofDividerAt: 0)
-    return (split, coordinator)
+    return (split, coordinator, presentation)
 }
 
 /// Der Umschalter muss **jedes Mal** wirken.
 ///
 /// Vorher hing er an einem Zustand: Ihn auf einen Wert zu setzen, den er schon
-/// hatte, tat nichts — nach einem Aufziehen oder nach dem automatischen
-/// Zuklappen im schmalen Fenster war der Knopf deshalb tot.
+/// hatte, tat nichts — nach einem Aufziehen war der Knopf deshalb tot.
 @Test @MainActor func togglingClosesAndOpensAgain() {
-    var zustand = false
-    let bindung = Binding(get: { zustand }, set: { zustand = $0 })
-    let (split, coordinator) = makeSplitView(collapsed: bindung)
+    let (split, coordinator, _) = makeSplitView()
 
     #expect(split.subviews[0].frame.width > 0)
 
@@ -51,9 +50,7 @@ private func makeSplitView(collapsed: Binding<Bool>) -> (
 /// Auch nach dem Aufziehen über den Rand bleibt der Umschalter wirksam —
 /// genau die Abfolge, in der er zuletzt hängenblieb.
 @Test @MainActor func theToggleStillWorksAfterRevealingFromTheEdge() {
-    var zustand = false
-    let bindung = Binding(get: { zustand }, set: { zustand = $0 })
-    let (split, coordinator) = makeSplitView(collapsed: bindung)
+    let (split, coordinator, _) = makeSplitView()
 
     coordinator.toggleSidebar(in: split)                      // zu
     #expect(split.subviews[0].frame.width < 1)
@@ -63,4 +60,31 @@ private func makeSplitView(collapsed: Binding<Bool>) -> (
 
     coordinator.toggleSidebar(in: split)                       // Knopf: wieder zu
     #expect(split.subviews[0].frame.width < 1)
+}
+
+/// SwiftUI can leave the split view wider than the visible window. Resizing
+/// must use the window's width and restore the sidebar when room returns.
+@Test @MainActor func sidebarFollowsVisibleWindowWidth() {
+    let (split, coordinator, _) = makeSplitView()
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1000, height: 800),
+        styleMask: [.titled, .resizable],
+        backing: .buffered,
+        defer: false
+    )
+    window.contentView?.addSubview(split)
+    split.windowWidthDidChange = { coordinator.windowWidthDidChange(in: $0) }
+
+    window.setContentSize(NSSize(width: 500, height: 800))
+    #expect(split.bounds.width > window.contentView!.bounds.width)
+    #expect(split.subviews[0].frame.width < 1)
+    #expect(!split.allowsSidebarReveal)
+
+    coordinator.toggleSidebar(in: split)
+    #expect(!coordinator.beginRevealDrag(in: split))
+    #expect(split.subviews[0].frame.width < 1)
+
+    window.setContentSize(NSSize(width: 1000, height: 800))
+    #expect(split.allowsSidebarReveal)
+    #expect(split.subviews[0].frame.width >= 160)
 }

@@ -78,6 +78,26 @@ import Testing
     #expect(ConfigStore.suiteName != Bundle.main.bundleIdentifier)
 }
 
+@Test func oldKeyboardSettingsKeepTheirValuesAndDefaultToShiftDelete() throws {
+    let old = Data(#"{"searchEnabled":false,"navigationEnabled":true,"arrowKeysEnabled":false,"navigationModifier":"⌥"}"#.utf8)
+    let shortcuts = try JSONDecoder().decode(KeyboardShortcuts.self, from: old)
+    #expect(!shortcuts.searchEnabled)
+    #expect(!shortcuts.arrowKeysEnabled)
+    #expect(shortcuts.navigationModifier == .option)
+    #expect(shortcuts.permanentDeleteModifier == .shift)
+}
+
+@Test func deleteShortcutRequiresTheChosenExactModifier() {
+    var shortcuts = KeyboardShortcuts()
+    #expect(shortcuts.deletionAction(command: false, shift: false, option: false, control: false) == .moveToTrash)
+    #expect(shortcuts.deletionAction(command: false, shift: true, option: false, control: false) == .deletePermanently)
+    #expect(shortcuts.deletionAction(command: true, shift: false, option: false, control: false) == nil)
+    shortcuts.permanentDeleteModifier = .command
+    #expect(shortcuts.deletionAction(command: true, shift: false, option: false, control: false) == .deletePermanently)
+    #expect(shortcuts.deletionAction(command: false, shift: true, option: false, control: false) == nil)
+    #expect(shortcuts.deletionAction(command: true, shift: true, option: false, control: false) == nil)
+}
+
 @Test func globalHotkeyAlwaysRetainsAModifier() throws {
     var hotkey = GlobalHotkey()
     hotkey.toggleModifier(.command)

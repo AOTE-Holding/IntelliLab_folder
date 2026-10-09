@@ -35,8 +35,6 @@ struct FileListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SortingToolbar(viewModel: viewModel)
-
             GeometryReader { geometry in
                 ScrollViewReader { proxy in
                 ScrollView {
@@ -46,6 +44,7 @@ struct FileListView: View {
                         }
                     }
                     .padding(.horizontal)
+                    .padding(.top, SortingToolbar.height)
                     // A ScrollView sizes its content to the files it contains.
                     // Match the visible height so clicks below the last file
                     // still land in this background and clear the selection.
@@ -62,14 +61,23 @@ struct FileListView: View {
                     dropFilesIntoCurrentFolder(providers)
                 }
                 .contextMenu {
-                    Button("New Folder") {
+                    Button("Create Folder") {
                         viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
                     }
+
+                    Button("Create New File") {
+                        viewModel.requestNewFile(in: viewModel.currentPath)
+                    }
+                    .disabled(!FileDropValidation.canWrite(to: viewModel.currentPath))
 
                     Divider()
 
                     Button("Open Command Line Here") {
                         openTerminal(at: viewModel.currentPath)
+                    }
+
+                    Button("Open VS Code Here") {
+                        VSCodeLauncher.open(viewModel.currentPath)
                     }
 
                     Divider()
@@ -78,6 +86,17 @@ struct FileListView: View {
                         operationCoordinator.paste(to: viewModel.currentPath)
                     }
                     .disabled(!clipboardManager.hasClipboardContent())
+
+                    Divider()
+
+                    Button("Properties") {
+                        FileInfoPanelController.shared.show(url: viewModel.currentPath)
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    SortingToolbar(viewModel: viewModel)
+                        .background(Color.folderBase)
+                        .padding(.trailing, 16)
                 }
                 // Die Auswahl bleibt sichtbar — siehe die gleichlautende Stelle
                 // in FileGridView.
@@ -144,6 +163,11 @@ struct FileListView: View {
                     onDragExited: { endSpringLoading(item) },
                     onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
                     onDoubleClick: { handleDoubleClick(item) },
+                    onNameClick: { viewModel.startRenaming(item) },
+                    nameClickRegion: .list(name: item.name),
+                    canRenameOnNameClick: {
+                        viewModel.selectedItems.count == 1 && viewModel.selectedItems.contains(item.id)
+                    },
                     onColorTagDrop: { farbe in
                         viewModel.applyColorTag(farbe, to: tagDropTargets(for: item)) {
                             searchViewModel.refreshTagsIfNeeded()

@@ -11,14 +11,17 @@ import SwiftUI
 
 @MainActor
 class SwiftUIWindowController: NSWindowController, NSWindowDelegate {
+    private let minimumWindowSize: NSSize
 
     init<Content: View>(
         rootView: Content,
         title: String,
         size: NSSize = NSSize(width: 1000, height: 700),
+        minimumSize: NSSize = NSSize(width: 320, height: 360),
         styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
         hidesTitle: Bool = false
     ) {
+        minimumWindowSize = minimumSize
         // Create the window
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: size),
@@ -47,9 +50,7 @@ class SwiftUIWindowController: NSWindowController, NSWindowDelegate {
         hostingView.autoresizingMask = [.width, .height]
         window.contentView = hostingView
         window.backgroundColor = NSColor.folderSidebar
-        // Do not let a wide navigation bar force the sidebar off-screen. The
-        // browser remains usable at the smallest supported window size.
-        window.minSize = NSSize(width: 320, height: 360)
+        window.minSize = minimumSize
 
         // Initialize the controller with the window
         super.init(window: window)
@@ -73,6 +74,25 @@ class SwiftUIWindowController: NSWindowController, NSWindowDelegate {
         // Native macOS behavior: close the window. AppDelegate keeps the
         // process alive and recreates/reopens a browser window from Dock/Menu.
         return true
+    }
+
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        NSSize(
+            width: max(frameSize.width, minimumWindowSize.width),
+            height: max(frameSize.height, minimumWindowSize.height)
+        )
+    }
+
+    func enforceMinimumSize() {
+        guard let window else { return }
+        let frame = window.frame
+        let width = max(frame.width, minimumWindowSize.width)
+        let height = max(frame.height, minimumWindowSize.height)
+        guard width != frame.width || height != frame.height else { return }
+        window.setFrame(
+            NSRect(x: frame.minX, y: frame.maxY - height, width: width, height: height),
+            display: true
+        )
     }
 
     // MARK: - Quick Look responder-chain ownership

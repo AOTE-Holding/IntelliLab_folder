@@ -30,7 +30,10 @@ class FileExplorerViewModel: ObservableObject {
     @Published var folderSizes: [URL: Int64] = [:] // Cache folder sizes
     @Published var renamingItem: UUID? // Track which item is being renamed
     @Published var renameText: String = "" // Current text in rename field
+    @Published var pendingNewFileDirectory: URL?
+    @Published var newFileName = ""
     private var pendingRenameURL: URL?
+    private var pendingRevealSelection: (directory: URL, item: URL)?
     @Published var isProcessing = false // Background file operation in progress
     /// Wie viele Spalten das Icon-Gitter gerade wirklich hat. Wird von der
     /// Gitteransicht gemessen und gemeldet — Pfeil hoch/runter rechnet damit.
@@ -196,11 +199,27 @@ class FileExplorerViewModel: ObservableObject {
                 }
             }
 
+            // A "Show in Folder" request can race an older directory load.
+            // Apply its selection in whichever load actually publishes the
+            // requested directory, after the real item IDs are available.
+            if let reveal = pendingRevealSelection,
+               reveal.directory.standardizedFileURL == requestedPath.standardizedFileURL {
+                pendingRevealSelection = nil
+                if let item = self.items.first(where: {
+                    $0.path.standardizedFileURL == reveal.item.standardizedFileURL
+                }) {
+                    selectOnly(item)
+                }
+            }
+
             // Start watching the current directory for changes
             fileWatcher.startWatching(url: requestedPath)
             QuickLookManager.shared.prewarmPreviewCache(for: self.items, in: requestedPath)
         } catch {
             guard generation == loadGeneration else { return }
+            if pendingRevealSelection?.directory.standardizedFileURL == requestedPath.standardizedFileURL {
+                pendingRevealSelection = nil
+            }
             self.errorMessage = "Failed to load directory: \(error.localizedDescription)"
             self.requiresPermission = Self.isPermissionDenied(error)
             self.items = []
@@ -260,6 +279,48 @@ class FileExplorerViewModel: ObservableObject {
 
         Task {
             await loadContents(showLoadingIndicator: false)
+        }
+    }
+
+    /// Opens the affected item's directory inside this browser and selects the
+    /// item once its contents have loaded. Failed operations point to the
+    /// original item; successful rows point to the created destination.
+    func showInFolder(_ result: FileOperationItemResult, operation: FileOperationKind) async {
+        let target = (result.outcome == .succeeded ? result.destination : nil)?
+            .standardizedFileURL ?? result.source.standardizedFileURL
+        let opensSourceDirectory = (operation == .createFolder || operation == .createFile)
+            && result.outcome != .succeeded
+        let directory = Self.nearestExistingDirectory(
+            startingAt: opensSourceDirectory ? target : target.deletingLastPathComponent()
+        )
+
+        if tagFilterMode != nil {
+            exitTagFilterMode()
+        }
+        if directory.standardizedFileURL != currentPath.standardizedFileURL {
+            navigationHistory.navigate(to: directory)
+            updateNavigationState()
+            prepareForNavigation(to: directory)
+        } else {
+            clearSelection()
+        }
+
+        pendingRevealSelection = opensSourceDirectory ? nil : (directory, target)
+        await loadContents(showLoadingIndicator: false)
+    }
+
+    private static func nearestExistingDirectory(startingAt url: URL) -> URL {
+        let manager = FileManager.default
+        var candidate = url.standardizedFileURL
+        while true {
+            var isDirectory: ObjCBool = false
+            if manager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                return candidate
+            }
+            let parent = candidate.deletingLastPathComponent()
+            if parent == candidate { return candidate }
+            candidate = parent
         }
     }
 
@@ -341,6 +402,7 @@ class FileExplorerViewModel: ObservableObject {
     private func prepareForNavigation(to url: URL) {
         loadGeneration += 1
         pendingRenameURL = nil
+        pendingRevealSelection = nil
         lastRefreshDate = nil
         scheduleLoadingIndicator()
         errorMessage = nil
@@ -590,6 +652,36 @@ class FileExplorerViewModel: ObservableObject {
 
     // MARK: - File Operations
 
+    var canCreateNewFile: Bool {
+        pendingNewFileDirectory != nil && FileOperationService.isValidNewFileName(newFileName)
+    }
+
+    func requestNewFile(in directory: URL) {
+        guard FileOperationPolicy.isEnabled, FileDropValidation.canWrite(to: directory) else { return }
+        newFileName = ""
+        pendingNewFileDirectory = directory.standardizedFileURL
+    }
+
+    func cancelNewFile() {
+        pendingNewFileDirectory = nil
+        newFileName = ""
+    }
+
+    func createPendingFile() {
+        guard let parent = pendingNewFileDirectory, canCreateNewFile else { return }
+        let name = newFileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        cancelNewFile()
+        if currentPath.standardizedFileURL != parent {
+            navigate(to: parent)
+        }
+        FileOperationCoordinator.shared.createFile(in: parent, named: name) { [weak self] newURL in
+            guard let self, let newURL,
+                  self.currentPath.standardizedFileURL == parent else { return }
+            self.pendingRevealSelection = (parent, newURL.standardizedFileURL)
+            Task { await self.loadContents() }
+        }
+    }
+
     func createNewFolder(named name: String, autoRename: Bool = false) {
         guard FileOperationPolicy.isEnabled, FileDropValidation.canWrite(to: currentPath) else { return }
         let parent = currentPath.standardizedFileURL
@@ -648,7 +740,6 @@ class FileExplorerViewModel: ObservableObject {
         guard !selectedItemsList.isEmpty else { return }
 
         FileOperationCoordinator.shared.moveToTrash(selectedItemsList.map(\.path))
-        selectedItems.removeAll()
     }
 
     // MARK: - Farb-Tags

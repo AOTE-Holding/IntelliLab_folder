@@ -17,6 +17,22 @@ final class FileInfoPanelController {
 
     private init() {}
 
+    func owns(window: NSWindow?) -> Bool {
+        window != nil && window === panel
+    }
+
+    @discardableResult
+    func closeIfVisible() -> Bool {
+        guard let panel, panel.isVisible else { return false }
+        panel.close()
+        return true
+    }
+
+    func show(url: URL) {
+        guard let item = try? FileSystemItem(from: url) else { return }
+        show(item: item)
+    }
+
     func show(item: FileSystemItem) {
         let rootView = FileInfoView(item: item)
 
@@ -25,7 +41,7 @@ final class FileInfoPanelController {
         } else {
             let panel = NSPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 520, height: 680),
-                styleMask: [.titled, .closable, .utilityWindow, .fullSizeContentView],
+                styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
                 backing: .buffered,
                 defer: false
             )

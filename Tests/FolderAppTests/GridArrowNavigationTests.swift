@@ -89,8 +89,8 @@ private func selectedIndex(_ model: SearchViewModel) -> Int? {
     #expect(selectedIndex(model) == 0)
 }
 
-/// Die Spaltenzahl folgt derselben Regel, nach der SwiftUI `.adaptive` auflöst.
-@Test func gridColumnsFollowTheAdaptiveLayoutRule() {
+/// Layout und Navigation verwenden dieselbe explizite Spaltenzahl.
+@Test func gridColumnsFitTheAvailableWidth() {
     let minimum = GridColumnMath.itemMinimum(iconSize: 64)   // 120
     #expect(minimum == 120)
 
@@ -105,6 +105,29 @@ private func selectedIndex(_ model: SearchViewModel) -> Int? {
             itemMinimum: GridColumnMath.itemMinimum(iconSize: 128)
         ) == 3
     )
+}
+
+@Test @MainActor func resizingChangesTheVerticalStepWithTheRenderedColumnCount() throws {
+    let (model, cleanup) = try modelWithSevenResults()
+    defer { cleanup() }
+    let minimum = GridColumnMath.itemMinimum(iconSize: 64)
+    let wide = GridColumnMath.columns(availableWidth: 650, itemMinimum: minimum)
+    let narrow = GridColumnMath.columns(availableWidth: 500, itemMinimum: minimum)
+
+    #expect(wide == 4)
+    #expect(narrow == 3)
+
+    model.selectedItems = [model.searchResults[0].id]
+    model.selectItemBelow(columnsPerRow: wide)
+    #expect(selectedIndex(model) == 4)
+
+    // Nach dem Verkleinern bleibt die Auswahl stehen; ab jetzt zählt eine
+    // sichtbare Zeile drei statt vier Positionen.
+    model.selectedItems = [model.searchResults[0].id]
+    model.selectItemBelow(columnsPerRow: narrow)
+    #expect(selectedIndex(model) == 3)
+    model.selectItemBelow(columnsPerRow: narrow)
+    #expect(selectedIndex(model) == 6)
 }
 
 /// Ein schmales Fenster darf nie 0 Spalten ergeben — sonst bewegt sich die

@@ -19,9 +19,8 @@ private struct BreadcrumbContentWidthKey: PreferenceKey {
 struct NavigationBar: View {
     @ObservedObject var viewModel: FileExplorerViewModel
     @ObservedObject var searchViewModel: SearchViewModel
-    /// Ob die Sidebar tatsächlich zu ist. Das schmale Fenster klappt sie auch
-    /// ohne Zutun des Nutzers zu — die Leiste muss dann ebenso einrücken.
-    var isSidebarActuallyCollapsed: Bool = false
+    @ObservedObject var sidebarPresentation: SidebarPresentationState
+    /// AppKit meldet Sichtbarkeit und Bedienbarkeit bei jeder Breitenänderung.
     /// Schaltet die Sidebar um. Bewusst ein Befehl und kein Zustand — welcher
     /// Zustand gilt, weiss nur die Aufteilung selbst.
     var toggleSidebar: () -> Void = {}
@@ -42,20 +41,23 @@ struct NavigationBar: View {
     /// Ob die Sidebar gerade wirklich zu sehen ist — abgeschaltet und
     /// eingeklappt sind zwei Wege zum selben Bild.
     private var isSidebarVisible: Bool {
-        settingsManager.settings.showSidebar && !isSidebarActuallyCollapsed
+        settingsManager.settings.showSidebar && !sidebarPresentation.isCollapsed
     }
 
     var body: some View {
         HStack(spacing: 6) {
-            // Sidebar toggle button
-            Button(action: toggleSidebar) {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundColor(.primary)
+            // Ist das Fenster zu schmal, klappt die Sidebar automatisch ein.
+            // Ein sichtbarer, wirkungsloser Knopf wäre hier irreführend.
+            if sidebarPresentation.canReveal {
+                Button(action: toggleSidebar) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.primary)
+                }
+                .buttonStyle(FolderChromeButtonStyle())
+                .help(sidebarPresentation.isCollapsed ? "Show sidebar" : "Hide sidebar")
+                .accessibilityLabel(sidebarPresentation.isCollapsed ? "Show sidebar" : "Hide sidebar")
             }
-            .buttonStyle(FolderChromeButtonStyle())
-            .help(isSidebarActuallyCollapsed ? "Show sidebar" : "Hide sidebar")
-            .accessibilityLabel(isSidebarActuallyCollapsed ? "Show sidebar" : "Hide sidebar")
 
             // Der Umschalter gehört zur Sidebar, die Pfeile zur Navigation.
             // Der Strich trennt die beiden — aber nur, solange es die Sidebar

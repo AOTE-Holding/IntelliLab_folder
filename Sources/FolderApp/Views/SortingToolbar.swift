@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Compact IntelliLab control strip for Finder-style sorting.
 struct SortingToolbar: View {
+    static let height: CGFloat = 42
     @ObservedObject var viewModel: FileExplorerViewModel
     @AppStorage("com.folder.sort-toolbar-alignment") private var alignmentRaw = ToolbarAlignment.leading.rawValue
 

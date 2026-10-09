@@ -32,26 +32,22 @@ struct FileGridView: View {
 
     private let spacing: CGFloat = GridColumnMath.spacing
     private let clickPauseInterval: TimeInterval = 0.5 // Time window for click-pause-click
-    private var columns: [GridItem] {
-        [GridItem(
-            .adaptive(minimum: GridColumnMath.itemMinimum(iconSize: viewModel.viewMode.iconSize)),
-            spacing: spacing
-        )]
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            SortingToolbar(viewModel: viewModel)
-
             GeometryReader { geometry in
+                let columnCount = GridColumnMath.columns(
+                    availableWidth: geometry.size.width,
+                    itemMinimum: GridColumnMath.itemMinimum(iconSize: viewModel.viewMode.iconSize)
+                )
                 ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVGrid(columns: columns, spacing: spacing) {
+                    LazyVGrid(columns: GridColumnMath.gridItems(count: columnCount, iconSize: viewModel.viewMode.iconSize), spacing: spacing) {
                         ForEach(viewModel.items) { item in
                         tile(for: item)
                         }
                     }
                     .padding()
+                    .padding(.top, SortingToolbar.height)
                     // A ScrollView sizes its content to the files it contains.
                     // Match the visible height so clicks below the last file
                     // still land in this background and clear the selection.
@@ -68,14 +64,23 @@ struct FileGridView: View {
                     dropFilesIntoCurrentFolder(providers)
                 }
                 .contextMenu {
-                    Button("New Folder") {
+                    Button("Create Folder") {
                         viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
                     }
+
+                    Button("Create New File") {
+                        viewModel.requestNewFile(in: viewModel.currentPath)
+                    }
+                    .disabled(!FileDropValidation.canWrite(to: viewModel.currentPath))
 
                     Divider()
 
                     Button("Open Command Line Here") {
                         openTerminal(at: viewModel.currentPath)
+                    }
+
+                    Button("Open VS Code Here") {
+                        VSCodeLauncher.open(viewModel.currentPath)
                     }
 
                     Divider()
@@ -84,10 +89,20 @@ struct FileGridView: View {
                         operationCoordinator.paste(to: viewModel.currentPath)
                     }
                     .disabled(!clipboardManager.hasClipboardContent())
+
+                    Divider()
+
+                    Button("Properties") {
+                        FileInfoPanelController.shared.show(url: viewModel.currentPath)
+                    }
                 }
-                .reportsGridColumns(iconSize: viewModel.viewMode.iconSize) { columns in
-                    viewModel.gridColumnsPerRow = columns
+                .overlay(alignment: .topLeading) {
+                    SortingToolbar(viewModel: viewModel)
+                        .background(Color.folderBase)
+                        .padding(.trailing, 16)
                 }
+                .onAppear { viewModel.gridColumnsPerRow = columnCount }
+                .onChange(of: columnCount) { count in viewModel.gridColumnsPerRow = count }
                 // Die Auswahl bleibt sichtbar. Ohne das wanderte sie beim
                 // Blättern mit den Pfeiltasten aus dem Bild — und die Vorschau
                 // fand beim Schliessen kein Ziel mehr, zu dem sie zurückzoomen
@@ -156,6 +171,11 @@ struct FileGridView: View {
                     onDragExited: { endSpringLoading(item) },
                     onSingleClick: { modifiers in handleSingleClick(item, modifiers: modifiers) },
                     onDoubleClick: { handleDoubleClick(item) },
+                    onNameClick: { viewModel.startRenaming(item) },
+                    nameClickRegion: .grid(iconSize: CGFloat(viewModel.viewMode.iconSize)),
+                    canRenameOnNameClick: {
+                        viewModel.selectedItems.count == 1 && viewModel.selectedItems.contains(item.id)
+                    },
                     onColorTagDrop: { farbe in
                         viewModel.applyColorTag(farbe, to: tagDropTargets(for: item)) { [weak searchViewModel] in
                             searchViewModel?.refreshTagsIfNeeded()
@@ -556,10 +576,25 @@ struct FileContextMenu: View {
             viewModel.openItem(item)
         }
 
+        Button("Create New File") {
+            viewModel.requestNewFile(in: item.type == .folder ? item.path : item.path.deletingLastPathComponent())
+        }
+        .disabled(!FileDropValidation.canWrite(to: item.type == .folder ? item.path : item.path.deletingLastPathComponent()))
+
         // Show the configured command-line launcher for folders.
         if item.type == .folder {
+            Button("Create Folder") {
+                viewModel.navigate(to: item.path)
+                viewModel.createNewFolder(named: "Untitled Folder", autoRename: true)
+            }
+            .disabled(!FileDropValidation.canWrite(to: item.path))
+
             Button("Open Command Line Here") {
                 openTerminal(at: item.path)
+            }
+
+            Button("Open VS Code Here") {
+                VSCodeLauncher.open(item.path)
             }
         }
 
@@ -699,6 +734,12 @@ struct FileContextMenu: View {
 
         Button("Add to Favorites") {
             sidebarManager.addFavorite(item.path, name: item.name, icon: item.type == .folder ? "folder.fill" : "doc.fill")
+        }
+
+        Divider()
+
+        Button("Properties") {
+            FileInfoPanelController.shared.show(item: item)
         }
     }
 

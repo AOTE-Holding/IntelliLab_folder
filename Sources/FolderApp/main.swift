@@ -292,9 +292,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 rootView: contentView,
                 title: "Folder",
                 size: NSSize(width: 1000, height: 700),
+                minimumSize: NSSize(width: 520, height: 360),
                 hidesTitle: true
             )
             controller.window?.setFrameAutosaveName("MainWindow")
+            controller.enforceMinimumSize()
             mainWindowController = controller
             WindowManager.shared.addWindowController(controller)
         }

@@ -153,6 +153,34 @@ struct KeyboardShortcuts: Codable {
     var searchEnabled: Bool
     var navigationEnabled: Bool
     var arrowKeysEnabled: Bool
+    var permanentDeleteModifier: PermanentDeleteModifier
+
+    enum PermanentDeleteModifier: String, Codable, CaseIterable {
+        case shift
+        case command
+
+        var displayName: String {
+            switch self {
+            case .shift: return "Shift + Delete"
+            case .command: return "Command + Delete"
+            }
+        }
+    }
+
+    enum DeletionAction: Equatable {
+        case moveToTrash
+        case deletePermanently
+    }
+
+    func deletionAction(command: Bool, shift: Bool, option: Bool, control: Bool) -> DeletionAction? {
+        guard !option && !control else { return nil }
+        if !command && !shift { return .moveToTrash }
+        switch permanentDeleteModifier {
+        case .shift where shift && !command: return .deletePermanently
+        case .command where command && !shift: return .deletePermanently
+        default: return nil
+        }
+    }
 
     // Modifier keys
     var navigationModifier: KeyModifier
@@ -179,12 +207,27 @@ struct KeyboardShortcuts: Codable {
         searchEnabled: Bool = true,
         navigationEnabled: Bool = true,
         arrowKeysEnabled: Bool = true,
-        navigationModifier: KeyModifier = .command
+        navigationModifier: KeyModifier = .command,
+        permanentDeleteModifier: PermanentDeleteModifier = .shift
     ) {
         self.searchEnabled = searchEnabled
         self.navigationEnabled = navigationEnabled
         self.arrowKeysEnabled = arrowKeysEnabled
         self.navigationModifier = navigationModifier
+        self.permanentDeleteModifier = permanentDeleteModifier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case searchEnabled, navigationEnabled, arrowKeysEnabled, navigationModifier, permanentDeleteModifier
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        searchEnabled = try values.decode(Bool.self, forKey: .searchEnabled)
+        navigationEnabled = try values.decode(Bool.self, forKey: .navigationEnabled)
+        arrowKeysEnabled = try values.decode(Bool.self, forKey: .arrowKeysEnabled)
+        navigationModifier = try values.decode(KeyModifier.self, forKey: .navigationModifier)
+        permanentDeleteModifier = try values.decodeIfPresent(PermanentDeleteModifier.self, forKey: .permanentDeleteModifier) ?? .shift
     }
 }
 

@@ -444,9 +444,9 @@ struct FileOperationResultView: View {
                 .font(.caption.weight(.medium))
                 .frame(width: 72, alignment: .trailing)
 
-            Button("Show in Finder") { onReveal(result) }
+            Button("Show in Folder") { onReveal(result) }
                 .buttonStyle(.borderless)
-                .frame(width: 104, alignment: .trailing)
+                .frame(width: 112, alignment: .trailing)
         }
         .padding(.horizontal, 10)
         .frame(minHeight: 44)

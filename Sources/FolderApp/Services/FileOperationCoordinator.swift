@@ -91,9 +91,10 @@ final class FileOperationCoordinator: ObservableObject {
         let report: FileOperationReport
     }
 
-    struct PendingTrash: Identifiable {
+    struct PendingDeletion: Identifiable {
         let id = UUID()
         let sources: [URL]
+        let permanently: Bool
     }
 
     @Published private(set) var isProcessing = false
@@ -106,7 +107,7 @@ final class FileOperationCoordinator: ObservableObject {
     @Published private(set) var progressPresentationOffset = CGSize.zero
     @Published var pendingConflict: PendingConflict?
     @Published var presentedReport: PresentedReport?
-    @Published var pendingTrash: PendingTrash?
+    @Published var pendingDeletion: PendingDeletion?
 
     private let service: FileOperationService
     private let clipboard: ClipboardManager
@@ -189,34 +190,44 @@ final class FileOperationCoordinator: ObservableObject {
     }
 
     func moveToTrash(_ sources: [URL]) {
-        guard FileOperationPolicy.isEnabled else { return }
-        guard !sources.isEmpty else { return }
-        pendingTrash = PendingTrash(sources: sources)
-        confirmPendingTrash()
+        requestDeletion(sources, permanently: false)
     }
 
-    func confirmPendingTrash() {
+    func deletePermanently(_ sources: [URL]) {
+        requestDeletion(sources, permanently: true)
+    }
+
+    private func requestDeletion(_ sources: [URL], permanently: Bool) {
+        guard FileOperationPolicy.isEnabled, !isProcessing, !sources.isEmpty else { return }
+        pendingDeletion = PendingDeletion(sources: sources, permanently: permanently)
+    }
+
+    func confirmPendingDeletion() {
         guard FileOperationPolicy.isEnabled else { return }
-        guard let request = pendingTrash else { return }
-        pendingTrash = nil
+        guard let request = pendingDeletion else { return }
+        pendingDeletion = nil
         start {
             let accessTokens = request.sources.compactMap { PermissionCenter.shared.beginAccess(to: $0) }
             defer { accessTokens.forEach { $0.stop() } }
-            let report = await self.service.moveToTrash(request.sources, progress: self.progressHandler)
-            let succeeded = report.succeeded
-            if !succeeded.isEmpty {
-                ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
-                    type: .trash,
-                    sourceURLs: succeeded.map(\.source),
-                    destinationURLs: succeeded.compactMap(\.destination)
-                ))
+            if request.permanently {
+                self.finish(await self.service.deletePermanently(request.sources, progress: self.progressHandler))
+            } else {
+                let report = await self.service.moveToTrash(request.sources, progress: self.progressHandler)
+                let succeeded = report.succeeded
+                if !succeeded.isEmpty {
+                    ActionHistoryManager.shared.record(ActionHistoryManager.FileAction(
+                        type: .trash,
+                        sourceURLs: succeeded.map(\.source),
+                        destinationURLs: succeeded.compactMap(\.destination)
+                    ))
+                }
+                self.finish(report)
             }
-            self.finish(report)
         }
     }
 
-    func cancelPendingTrash() {
-        pendingTrash = nil
+    func cancelPendingDeletion() {
+        pendingDeletion = nil
     }
 
     func drop(_ sources: [URL], into destination: URL, forceCopy: Bool = false) {
@@ -351,15 +362,21 @@ final class FileOperationCoordinator: ObservableObject {
         }
     }
 
+    func createFile(in parent: URL, named name: String, completion: ((URL?) -> Void)? = nil) {
+        guard FileOperationPolicy.isEnabled else { return }
+        start {
+            let access = PermissionCenter.shared.beginAccess(to: parent)
+            defer { access?.stop() }
+            let report = await self.service.createFile(in: parent, named: name)
+            completion?(report.succeeded.first?.destination)
+            self.finish(report)
+        }
+    }
+
     func cancel() {
         guard isProcessing else { return }
         isCancellationRequested = true
         operationTask?.cancel()
-    }
-
-    func reveal(_ result: FileOperationItemResult) {
-        let url = result.destination ?? result.source
-        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     private var progressHandler: FileOperationService.ProgressHandler {

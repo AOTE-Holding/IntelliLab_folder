@@ -8,6 +8,7 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+@preconcurrency import Quartz
 
 /// The browser shown in a Folder window. Tabs are optional and stay disabled
 /// until the user enables them in Settings.
@@ -52,9 +53,36 @@ struct ContentView: View {
         .sheet(item: $operationCoordinator.presentedReport) { presented in
             FileOperationResultView(
                 report: presented.report,
-                onReveal: { operationCoordinator.reveal($0) },
+                onReveal: { result in
+                    let browser = (tabsEnabled ? tabManager?.selectedTab?.viewModel : nil) ?? viewModel
+                    operationCoordinator.presentedReport = nil
+                    Task {
+                        await browser.showInFolder(result, operation: presented.report.kind)
+                    }
+                },
                 onDone: { operationCoordinator.presentedReport = nil }
             )
+        }
+        .alert(
+            operationCoordinator.pendingDeletion?.permanently == true ? "Delete Permanently?" : "Move to Trash?",
+            isPresented: Binding(
+                get: { operationCoordinator.pendingDeletion != nil },
+                set: { if !$0 { operationCoordinator.cancelPendingDeletion() } }
+            )
+        ) {
+            Button("Cancel", role: .cancel) { operationCoordinator.cancelPendingDeletion() }
+            Button(
+                operationCoordinator.pendingDeletion?.permanently == true ? "Delete Permanently" : "Move to Trash",
+                role: .destructive
+            ) {
+                operationCoordinator.confirmPendingDeletion()
+            }
+        } message: {
+            if let request = operationCoordinator.pendingDeletion {
+                Text(request.permanently
+                    ? "Permanently delete \(request.sources.count) selected item(s)? This cannot be undone."
+                    : "Move \(request.sources.count) selected item(s) to Trash?")
+            }
         }
         .alert(
             "Could Not Eject Volume",
@@ -195,9 +223,8 @@ struct FolderBrowserView: View {
     @State private var keyEventMonitor: Any?
     @State private var renameDismissMonitor: Any?
     @State private var showingSearchErrors = false
-    /// Ob die Sidebar tatsächlich zu ist — auch wenn nur das schmale Fenster
-    /// sie zugeklappt hat. Danach richten sich Leiste, Anfasser und Trennstrich.
-    @State private var sidebarIsCollapsed = false
+    /// Sichtbarkeit und Bedienbarkeit der Sidebar für die Navigationsleiste.
+    @StateObject private var sidebarPresentation = SidebarPresentationState()
     @State private var sidebarToggleRequest = 0
     @State private var appliedDefaultViewMode: AppSettings.DisplayMode?
     @State private var appliedIconSize: Int?
@@ -224,7 +251,7 @@ struct FolderBrowserView: View {
                         fileExplorerViewModel: viewModel
                     ),
                     detail: mainContentArea,
-                    isEffectivelyCollapsed: $sidebarIsCollapsed,
+                    presentation: sidebarPresentation,
                     toggleRequest: sidebarToggleRequest
                 )
             } else {
@@ -273,6 +300,20 @@ struct FolderBrowserView: View {
         }
         .background(Color.folderBase)
         .preferredColorScheme(colorScheme)
+        .alert(
+            "Create New File",
+            isPresented: Binding(
+                get: { viewModel.pendingNewFileDirectory != nil },
+                set: { if !$0 { viewModel.cancelNewFile() } }
+            )
+        ) {
+            TextField("Filename.extension", text: $viewModel.newFileName)
+            Button("Cancel", role: .cancel) { viewModel.cancelNewFile() }
+            Button("Create") { viewModel.createPendingFile() }
+                .disabled(!viewModel.canCreateNewFile)
+        } message: {
+            Text("Enter the full filename, including its extension (for example, notes.md).")
+        }
         // The main browser uses the transparent titlebar as usable chrome:
         // navigation is flush with the window top while the native traffic
         // lights remain available over the sidebar.
@@ -364,12 +405,11 @@ struct FolderBrowserView: View {
             NavigationBar(
                 viewModel: viewModel,
                 searchViewModel: searchViewModel,
-                isSidebarActuallyCollapsed: sidebarIsCollapsed,
+                sidebarPresentation: sidebarPresentation,
                 toggleSidebar: { sidebarToggleRequest += 1 }
             )
                 .padding(.horizontal, 12)
                 .padding(.top, 6)
-                .padding(.bottom, tabStrip == nil ? 10 : 0)
 
             if let tabStrip {
                 tabStrip
@@ -583,6 +623,12 @@ struct FolderBrowserView: View {
     }
 
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
+        if FileInfoPanelController.shared.owns(window: event.window),
+           event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.command],
+           event.charactersIgnoringModifiers?.lowercased() == "i" {
+            return FileInfoPanelController.shared.closeIfVisible()
+        }
+
         // Keep Finder-style browser selection and Quick Look on one shared index.
         // This check must precede the browser-window guard: while the preview
         // panel is key, its window is not the main browser window. Consuming
@@ -592,6 +638,14 @@ struct FolderBrowserView: View {
            QuickLookManager.navigationDirection(forKeyCode: event.keyCode) != nil,
            event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
             return QuickLookManager.shared.handleNavigationKey(event.keyCode)
+        }
+
+        if event.keyCode == 49,
+           QuickLookManager.shared.isPreviewVisible,
+           event.window is QLPreviewPanel,
+           event.modifierFlags.intersection([.command, .control, .option]).isEmpty {
+            QuickLookManager.shared.closePreview()
+            return true
         }
 
         guard event.window === (NSApp.delegate as? AppDelegate)?.mainWindowController?.window else { return false }
@@ -655,7 +709,9 @@ struct FolderBrowserView: View {
 
             case "i":
                 guard !isTextField else { return false }
-                showGetInfo()
+                if !FileInfoPanelController.shared.closeIfVisible() {
+                    showGetInfo()
+                }
                 return true
 
             default:
@@ -672,11 +728,24 @@ struct FolderBrowserView: View {
             return false
         }
 
-        if event.keyCode == 51 {
+        if event.keyCode == 51 || event.keyCode == 117 {
+            guard let action = shortcuts.deletionAction(
+                command: isCommandPressed,
+                shift: modifiers.contains(.shift),
+                option: isOptionPressed,
+                control: isControlPressed
+            ) else { return true }
+            let sources: [URL]
             if searchViewModel.isSearchActive && !searchViewModel.selectedItems.isEmpty {
-                searchViewModel.deleteSelectedItems()
+                sources = searchViewModel.searchResults
+                    .filter { searchViewModel.selectedItems.contains($0.id) }.map(\.path)
             } else {
-                viewModel.deleteSelectedItems()
+                sources = viewModel.items.filter { viewModel.selectedItems.contains($0.id) }.map(\.path)
+            }
+            guard !sources.isEmpty else { return true }
+            switch action {
+            case .moveToTrash: operationCoordinator.moveToTrash(sources)
+            case .deletePermanently: operationCoordinator.deletePermanently(sources)
             }
             return true
         }
@@ -779,7 +848,11 @@ struct FolderBrowserView: View {
             return true
 
         case 49: // Space bar - Quick Look
-            showQuickLook()
+            if QuickLookManager.shared.isPreviewVisible {
+                QuickLookManager.shared.closePreview()
+            } else {
+                showQuickLook()
+            }
             return true
 
         default:
@@ -924,8 +997,13 @@ private enum SidebarSplitMetrics {
     static let dividerWidth: CGFloat = 8
     static let magneticWidth: CGFloat = 220
     static let magneticRange: CGFloat = 16
-    static let collapseWindowWidth: CGFloat = 520
-    static let expandWindowWidth: CGFloat = 560
+    static let expandHysteresis: CGFloat = 40
+}
+
+@MainActor
+final class SidebarPresentationState: ObservableObject {
+    @Published var isCollapsed = false
+    @Published var canReveal = true
 }
 
 /// AppKit owns divider tracking, so a wide SwiftUI grid is not rebuilt through
@@ -936,20 +1014,19 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
     /// Ob die Sidebar gerade **tatsächlich** zu ist — auch wenn nur das schmale
     /// Fenster sie zugeklappt hat.
     ///
-    /// Ohne diese zweite Bindung wusste die Oberfläche von der automatischen
-    /// Variante nichts: Die Leiste rückte nicht von den Fensterknöpfen weg, der
-    /// Anfasser blieb unsichtbar, und Aufziehen ging weder per Knopf noch am Rand.
-    @Binding var isEffectivelyCollapsed: Bool
+    /// So richtet die Navigationsleiste ihren Abstand nach dem sichtbaren
+    /// Zustand und nicht nur nach der letzten Nutzeraktion.
+    /// Die Navigationsleiste beobachtet denselben Zustand direkt. Das ist auch
+    /// dann aktuell, wenn AppKit die Split-Ansicht ohne SwiftUI-Update ändert.
+    let presentation: SidebarPresentationState
     /// Wird hochgezählt, wenn der Nutzer die Sidebar umschalten will.
     ///
-    /// Ein Zustand allein genügt dafür nicht: Hat das schmale Fenster zugeklappt,
-    /// steht die Nutzerwahl bereits auf „offen“, und ein erneutes Setzen auf
-    /// „offen“ ändert nichts — der Knopf bliebe wirkungslos. Ein Zähler ist
-    /// dagegen jedes Mal ein neues Ereignis.
+    /// Ein Zähler liefert für jeden Klick ein neues Ereignis, auch wenn die
+    /// Sidebar zuvor manuell geschlossen oder am Rand aufgezogen wurde.
     let toggleRequest: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(isEffectivelyCollapsed: $isEffectivelyCollapsed)
+        Coordinator(presentation: presentation)
     }
 
     func makeNSView(context: Context) -> FolderNativeSplitView {
@@ -965,10 +1042,17 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         splitView.endSidebarReveal = { [weak coordinator] splitView in
             coordinator?.endRevealDrag(in: splitView)
         }
+        splitView.windowWidthDidChange = { [weak coordinator] splitView in
+            coordinator?.windowWidthDidChange(in: splitView)
+        }
 
         let sidebarHost = NSHostingView(rootView: sidebar)
         let detailHost = NSHostingView(rootView: detail)
         if #available(macOS 13.3, *) {
+            // SidebarView reserves exactly one fixed strip for the traffic
+            // lights. An additional AppKit safe area doubles that gap and can
+            // shift when the window height changes.
+            sidebarHost.safeAreaRegions = []
             // The split view creates its own hosting hierarchy. Its detail
             // host must opt out of the titlebar safe area as well; otherwise
             // the navigation bar is pushed down despite the window itself
@@ -980,6 +1064,7 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
 
         let saved = CGFloat(ConfigStore.shared.double(forKey: SidebarSplitMetrics.widthKey))
         let initialWidth = saved > 0 ? saved : SidebarSplitMetrics.defaultWidth
+        coordinator.rememberSidebarWidth(initialWidth)
         splitView.setPosition(
             min(max(initialWidth, SidebarSplitMetrics.minimumWidth), SidebarSplitMetrics.maximumWidth),
             ofDividerAt: 0
@@ -1001,16 +1086,15 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
 
     @MainActor
     final class Coordinator: NSObject, NSSplitViewDelegate {
-        private var isEffectivelyCollapsed: Binding<Bool>
+        private let presentation: SidebarPresentationState
         private var pendingSave: DispatchWorkItem?
         private var sidebarIsCollapsedForWindow = false
         private var sidebarIsManuallyCollapsed = false
         private var lastExpandedWidth = SidebarSplitMetrics.defaultWidth
 
-        /// Der Nutzer hat die Sidebar im schmalen Fenster ausdrücklich geholt.
-        /// Dann bleibt sie, bis er sie selbst wieder zuklappt — sonst würde die
-        /// automatische Regel sie ihm sofort wieder wegnehmen.
-        private var keepSidebarInNarrowWindow = false
+        func rememberSidebarWidth(_ width: CGFloat) {
+            lastExpandedWidth = min(max(width, SidebarSplitMetrics.minimumWidth), SidebarSplitMetrics.maximumWidth)
+        }
 
         /// Der Nutzer zieht die Sidebar gerade am zugeklappten Rand auf.
         ///
@@ -1020,20 +1104,16 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         /// zugeklappt — jede weitere Bewegung lief dann ins Leere.
         private var wirdAufgezogen = false
 
-        init(isEffectivelyCollapsed: Binding<Bool>) {
-            self.isEffectivelyCollapsed = isEffectivelyCollapsed
+        init(presentation: SidebarPresentationState) {
+            self.presentation = presentation
         }
 
         private var lastToggleRequest = 0
 
         /// Ein Klick auf den Umschalter — als **Anforderung**, nicht als Zustand.
         ///
-        /// Der Zustand hat hier dreimal versagt: Setzt man ihn auf einen Wert,
-        /// den er schon hat, passiert nichts. Nach einem Aufziehen stand die
-        /// Wahl noch auf „zugeklappt“, das schmale Fenster klappte ohne Zutun
-        /// zu — in beiden Fällen war der Knopf danach wirkungslos. Ein Zähler
-        /// ist dagegen jedes Mal ein neues Ereignis, und die Wahrheit über
-        /// „offen oder zu“ liegt nur noch hier.
+        /// Der Zähler erfasst auch wiederholte Klicks nach einem Randzug.
+        /// Den tatsächlichen Zustand verwaltet nur die Aufteilung.
         func handleToggleRequest(_ request: Int, in splitView: NSSplitView) {
             guard request != lastToggleRequest else { return }
             lastToggleRequest = request
@@ -1062,7 +1142,6 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
                 lastExpandedWidth = sidebar.frame.width
             }
             sidebarIsManuallyCollapsed = true
-            keepSidebarInNarrowWindow = false
             splitView.setPosition(0, ofDividerAt: 0)
             publishCollapsedState()
         }
@@ -1076,12 +1155,15 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         /// Die Meldung geht nur in eine Richtung: von hier zur Oberfläche.
         /// Zurück kommen ausschliesslich Anforderungen.
         func publishCollapsedState() {
-            let neuerZustand = isActuallyCollapsed
-            guard isEffectivelyCollapsed.wrappedValue != neuerZustand else { return }
-            let bindung = isEffectivelyCollapsed
+            let collapsed = isActuallyCollapsed
+            let canReveal = !sidebarIsCollapsedForWindow
             DispatchQueue.main.async {
-                guard bindung.wrappedValue != neuerZustand else { return }
-                bindung.wrappedValue = neuerZustand
+                if self.presentation.isCollapsed != collapsed {
+                    self.presentation.isCollapsed = collapsed
+                }
+                if self.presentation.canReveal != canReveal {
+                    self.presentation.canReveal = canReveal
+                }
             }
         }
 
@@ -1091,8 +1173,8 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
 
         /// Aufklappen auf die gemerkte Breite — für den Knopf in der Leiste.
         func revealManuallyCollapsedSidebar(in splitView: NSSplitView) -> Bool {
-            guard isActuallyCollapsed else { return false }
-            hebeGründeFürZuAuf()
+            guard isActuallyCollapsed, !sidebarIsCollapsedForWindow else { return false }
+            sidebarIsManuallyCollapsed = false
             splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
             publishCollapsedState()
             return true
@@ -1104,8 +1186,8 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
         /// sonst springt die Sidebar erst auf die gemerkte Breite und fällt im
         /// nächsten Moment auf die Zeigerposition zurück.
         func beginRevealDrag(in splitView: NSSplitView) -> Bool {
-            guard isActuallyCollapsed else { return false }
-            hebeGründeFürZuAuf()
+            guard isActuallyCollapsed, !sidebarIsCollapsedForWindow else { return false }
+            sidebarIsManuallyCollapsed = false
             // Eine zugeklappte Fläche ist ausgeblendet. Bleibt sie das, bewegt
             // der Zug eine unsichtbare Sidebar.
             splitView.subviews.first?.isHidden = false
@@ -1131,13 +1213,44 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
             publishCollapsedState()
         }
 
-        /// Beide Gründe aufheben. Vorher zählte nur der vom Nutzer gewählte —
-        /// im schmalen Fenster liess sich die Sidebar deshalb gar nicht holen.
-        private func hebeGründeFürZuAuf() {
-            sidebarIsManuallyCollapsed = false
-            if sidebarIsCollapsedForWindow {
+        /// Das Fenster kann schmaler sein als die vom SwiftUI-Inhalt
+        /// vorgeschlagene Split-View-Breite. Deshalb entscheidet die sichtbare
+        /// Fensterbreite, nicht allein `splitView.bounds.width`.
+        private func availableWidth(in splitView: NSSplitView) -> CGFloat {
+            guard let windowWidth = splitView.window?.contentView?.bounds.width else {
+                return splitView.bounds.width
+            }
+            return min(windowWidth, splitView.bounds.width)
+        }
+
+        func windowWidthDidChange(in splitView: NSSplitView) {
+            adjustForAvailableWidth(in: splitView)
+        }
+
+        func adjustForAvailableWidth(in splitView: NSSplitView) {
+            guard let sidebar = splitView.subviews.first, !wirdAufgezogen else { return }
+            let available = availableWidth(in: splitView)
+            let needed = lastExpandedWidth + SidebarSplitMetrics.dividerWidth
+                + SidebarSplitMetrics.minimumDetailWidth
+
+            if available < needed, !sidebarIsCollapsedForWindow {
+                if sidebar.frame.width >= SidebarSplitMetrics.minimumWidth {
+                    lastExpandedWidth = sidebar.frame.width
+                }
+                sidebarIsCollapsedForWindow = true
+                (splitView as? FolderNativeSplitView)?.allowsSidebarReveal = false
+                splitView.setPosition(0, ofDividerAt: 0)
+                publishCollapsedState()
+                return
+            }
+            if sidebarIsCollapsedForWindow,
+               available >= needed + SidebarSplitMetrics.expandHysteresis {
                 sidebarIsCollapsedForWindow = false
-                keepSidebarInNarrowWindow = true
+                (splitView as? FolderNativeSplitView)?.allowsSidebarReveal = true
+                if !sidebarIsManuallyCollapsed {
+                    splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
+                }
+                publishCollapsedState()
             }
         }
 
@@ -1215,14 +1328,8 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
             // Wer hier eingreift, nimmt dem Nutzer den Zug aus der Hand.
             guard !wirdAufgezogen else { return }
 
-            let windowIsNarrow = splitView.bounds.width <= SidebarSplitMetrics.collapseWindowWidth
-            if windowIsNarrow, !sidebarIsCollapsedForWindow, !keepSidebarInNarrowWindow {
-                lastExpandedWidth = sidebar.frame.width
-                sidebarIsCollapsedForWindow = true
-                splitView.setPosition(0, ofDividerAt: 0)
-                publishCollapsedState()
-                return
-            }
+            adjustForAvailableWidth(in: splitView)
+            if sidebarIsCollapsedForWindow { return }
             // A native divider gesture (for example a double-click on the
             // divider) can collapse the sidebar without passing through the
             // toolbar. Reflect that state so one toolbar click restores it.
@@ -1230,17 +1337,6 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
                sidebar.frame.width < 1,
                !sidebarIsManuallyCollapsed {
                 sidebarIsManuallyCollapsed = true
-                    keepSidebarInNarrowWindow = false
-                publishCollapsedState()
-                return
-            }
-            if !windowIsNarrow,
-               sidebarIsCollapsedForWindow,
-               splitView.bounds.width >= SidebarSplitMetrics.expandWindowWidth {
-                sidebarIsCollapsedForWindow = false
-                if !sidebarIsManuallyCollapsed {
-                    splitView.setPosition(clamped(lastExpandedWidth, in: splitView), ofDividerAt: 0)
-                }
                 publishCollapsedState()
                 return
             }
@@ -1260,6 +1356,41 @@ struct NativeSidebarSplitView<Sidebar: View, Detail: View>: NSViewRepresentable 
 final class FolderNativeSplitView: NSSplitView {
     var beginSidebarReveal: ((FolderNativeSplitView) -> Bool)?
     var endSidebarReveal: ((FolderNativeSplitView) -> Void)?
+    var windowWidthDidChange: ((FolderNativeSplitView) -> Void)?
+    var allowsSidebarReveal = true {
+        didSet {
+            guard allowsSidebarReveal != oldValue else { return }
+            window?.invalidateCursorRects(for: self)
+            needsDisplay = true
+        }
+    }
+    nonisolated(unsafe) private var windowResizeObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let windowResizeObserver {
+            NotificationCenter.default.removeObserver(windowResizeObserver)
+            self.windowResizeObserver = nil
+        }
+        guard let window else { return }
+        windowResizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.windowWidthDidChange?(self)
+            }
+        }
+        windowWidthDidChange?(self)
+    }
+
+    deinit {
+        if let windowResizeObserver {
+            NotificationCenter.default.removeObserver(windowResizeObserver)
+        }
+    }
 
     private var sidebarIsCollapsed: Bool { (subviews.first?.frame.width ?? 0) < 1 }
 
@@ -1283,7 +1414,7 @@ final class FolderNativeSplitView: NSSplitView {
     /// Der zugeklappte Rand muss die Maus selbst annehmen. Ohne das landet der
     /// Klick auf der Inhaltsfläche, die dort beginnt, und der Zug kommt nie an.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard sidebarIsCollapsed, let superview else { return super.hitTest(point) }
+        guard sidebarIsCollapsed, allowsSidebarReveal, let superview else { return super.hitTest(point) }
         let lokal = convert(point, from: superview)
         if bounds.contains(lokal), lokal.x <= Self.revealZoneWidth { return self }
         return super.hitTest(point)
@@ -1298,7 +1429,7 @@ final class FolderNativeSplitView: NSSplitView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard sidebarIsCollapsed else { return }
+        guard sidebarIsCollapsed, allowsSidebarReveal else { return }
         // Der Zeiger sagt, dass hier etwas aufzuziehen ist — dieselbe Ansage,
         // die der offene Trennbereich macht.
         addCursorRect(
@@ -1309,7 +1440,7 @@ final class FolderNativeSplitView: NSSplitView {
 
     override func mouseDown(with event: NSEvent) {
         let location = convert(event.locationInWindow, from: nil)
-        guard sidebarIsCollapsed, location.x <= Self.revealZoneWidth,
+        guard sidebarIsCollapsed, allowsSidebarReveal, location.x <= Self.revealZoneWidth,
               let beginSidebarReveal, let window else {
             super.mouseDown(with: event)
             return
@@ -1369,6 +1500,7 @@ final class FolderNativeSplitView: NSSplitView {
         guard !sidebarIsCollapsed else {
             NSColor.folderBase.setFill()
             rect.fill()
+            guard allowsSidebarReveal else { return }
             let grip = NSRect(x: rect.midX - 2, y: rect.midY - 22, width: 4, height: 44)
             NSColor.secondaryLabelColor.withAlphaComponent(0.55).setFill()
             NSBezierPath(roundedRect: grip, xRadius: 2, yRadius: 2).fill()
@@ -1437,56 +1569,54 @@ struct SearchResultsGridView: View {
     @StateObject private var clipboardManager = ClipboardManager.shared
 
     private let spacing: CGFloat = GridColumnMath.spacing
-    private var columns: [GridItem] {
-        [GridItem(
-            .adaptive(minimum: GridColumnMath.itemMinimum(iconSize: fileExplorerViewModel.viewMode.iconSize)),
-            spacing: spacing
-        )]
-    }
-
     var body: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: spacing) {
-                ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
-                    FileGridItem(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false, iconSize: CGFloat(fileExplorerViewModel.viewMode.iconSize))
-                        .overlay {
-                            Color.clear
-                                .multiFileDrag(
-                                    urls: searchViewModel.isSelected(item)
-                                        ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }.map { $0.path }
-                                        : [item.path],
-                                    enabled: true,
-                                    onSingleClick: { modifiers in handleSearchItemClick(item, modifiers: modifiers) },
-                                    onDoubleClick: {
-                                        fileExplorerViewModel.openItem(item)
-                                    }
-                                )
-                        }
-                        .contextMenu {
-                            FileContextMenu(
-                                item: item,
-                                viewModel: fileExplorerViewModel,
-                                clipboardManager: clipboardManager,
-                                allItems: searchViewModel.searchResults,
-                                selectedItemIDs: searchViewModel.selectedItems,
-                                searchViewModel: searchViewModel
-                            )
-                        }
-                }
-            }
-            .padding()
-            .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
-            .background(
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        NSApp.keyWindow?.makeFirstResponder(nil)
-                        searchViewModel.clearSelection()
-                    }
+        GeometryReader { geometry in
+            let columnCount = GridColumnMath.columns(
+                availableWidth: geometry.size.width,
+                itemMinimum: GridColumnMath.itemMinimum(iconSize: fileExplorerViewModel.viewMode.iconSize)
             )
-        }
-        .reportsGridColumns(iconSize: fileExplorerViewModel.viewMode.iconSize) { columns in
-            fileExplorerViewModel.gridColumnsPerRow = columns
+            ScrollView {
+                LazyVGrid(columns: GridColumnMath.gridItems(count: columnCount, iconSize: fileExplorerViewModel.viewMode.iconSize), spacing: spacing) {
+                    ForEach(Array(searchViewModel.searchResults), id: \.id) { (item: FileSystemItem) in
+                        FileGridItem(item: item, isSelected: searchViewModel.isSelected(item), clipboardManager: clipboardManager, isDimmed: false, iconSize: CGFloat(fileExplorerViewModel.viewMode.iconSize))
+                            .overlay {
+                                Color.clear
+                                    .multiFileDrag(
+                                        urls: searchViewModel.isSelected(item)
+                                            ? searchViewModel.searchResults.filter { searchViewModel.selectedItems.contains($0.id) }.map { $0.path }
+                                            : [item.path],
+                                        enabled: true,
+                                        onSingleClick: { modifiers in handleSearchItemClick(item, modifiers: modifiers) },
+                                        onDoubleClick: {
+                                            fileExplorerViewModel.openItem(item)
+                                        }
+                                    )
+                            }
+                            .contextMenu {
+                                FileContextMenu(
+                                    item: item,
+                                    viewModel: fileExplorerViewModel,
+                                    clipboardManager: clipboardManager,
+                                    allItems: searchViewModel.searchResults,
+                                    selectedItemIDs: searchViewModel.selectedItems,
+                                    searchViewModel: searchViewModel
+                                )
+                            }
+                    }
+                }
+                .padding()
+                .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity, alignment: .topLeading)
+                .background(
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                            searchViewModel.clearSelection()
+                        }
+                )
+            }
+            .onAppear { fileExplorerViewModel.gridColumnsPerRow = columnCount }
+            .onChange(of: columnCount) { count in fileExplorerViewModel.gridColumnsPerRow = count }
         }
     }
 

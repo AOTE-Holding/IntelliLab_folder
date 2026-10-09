@@ -355,7 +355,5 @@ class SearchViewModel: ObservableObject {
         let itemsToDelete = searchResults.filter { selectedItems.contains($0.id) }
         guard !itemsToDelete.isEmpty else { return }
         FileOperationCoordinator.shared.moveToTrash(itemsToDelete.map(\.path))
-        selectedItems.removeAll()
-        lastSelectedItem = nil
     }
 }

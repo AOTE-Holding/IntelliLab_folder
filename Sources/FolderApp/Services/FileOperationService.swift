@@ -5,9 +5,11 @@ import ZIPFoundation
 
 enum FileOperationKind: String, Codable, Sendable, Equatable {
     case createFolder
+    case createFile
     case copy
     case move
     case trash
+    case deletePermanently
     case rename
     case duplicate
     case compress
@@ -250,6 +252,16 @@ actor FileOperationService {
         return FileOperationReport(kind: .trash, results: results)
     }
 
+    func deletePermanently(
+        _ sources: [URL],
+        progress: ProgressHandler? = nil
+    ) async -> FileOperationReport {
+        let results = await performParallel(sources, progress: progress) { _, source in
+            Self.deleteItem(source)
+        }
+        return FileOperationReport(kind: .deletePermanently, results: results)
+    }
+
     func relocateExactly(_ items: [FileRelocation], kind: FileOperationKind) async -> FileOperationReport {
         precondition(kind == .copy || kind == .move)
         var results: [FileOperationItemResult] = []
@@ -311,6 +323,34 @@ actor FileOperationService {
             return FileOperationReport(kind: .createFolder, results: [result(source: parent, destination: destination, outcome: .succeeded)])
         } catch {
             return FileOperationReport(kind: .createFolder, results: [result(source: parent, destination: destination, outcome: .failed, message: error.localizedDescription)])
+        }
+    }
+
+    nonisolated static func isValidNewFileName(_ requestedName: String) -> Bool {
+        let name = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.contains("/"), !name.contains("\0"),
+              let dot = name.lastIndex(of: ".") else { return false }
+        return dot != name.startIndex && name.index(after: dot) != name.endIndex
+    }
+
+    func createFile(in parent: URL, named requestedName: String) async -> FileOperationReport {
+        let name = requestedName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidNewFileName(name) else {
+            return FileOperationReport(kind: .createFile, results: [
+                result(source: parent, outcome: .failed, message: "Enter a filename with an extension, such as notes.md.")
+            ])
+        }
+
+        let destination = parent.appendingPathComponent(name, isDirectory: false)
+        do {
+            try Data().write(to: destination, options: .withoutOverwriting)
+            return FileOperationReport(kind: .createFile, results: [
+                result(source: parent, destination: destination, outcome: .succeeded)
+            ])
+        } catch {
+            return FileOperationReport(kind: .createFile, results: [
+                result(source: parent, destination: destination, outcome: .failed, message: error.localizedDescription)
+            ])
         }
     }
 
@@ -536,6 +576,15 @@ actor FileOperationService {
             var trashURL: NSURL?
             try FileManager.default.trashItem(at: source, resultingItemURL: &trashURL)
             return FileOperationItemResult(source: source, destination: trashURL as URL?, outcome: .succeeded, message: nil, replacedItemInTrash: nil)
+        } catch {
+            return FileOperationItemResult(source: source, destination: nil, outcome: .failed, message: error.localizedDescription, replacedItemInTrash: nil)
+        }
+    }
+
+    nonisolated private static func deleteItem(_ source: URL) -> FileOperationItemResult {
+        do {
+            try FileManager.default.removeItem(at: source)
+            return FileOperationItemResult(source: source, destination: nil, outcome: .succeeded, message: nil, replacedItemInTrash: nil)
         } catch {
             return FileOperationItemResult(source: source, destination: nil, outcome: .failed, message: error.localizedDescription, replacedItemInTrash: nil)
         }
