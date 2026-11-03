@@ -232,6 +232,104 @@ private func temporaryDirectory() throws -> URL {
     }
 }
 
+@Test func batchRotationProcessesImagesAndReportsUnsupportedFiles() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let first = root.appendingPathComponent("first.jpg")
+    let second = root.appendingPathComponent("second.jpg")
+    let svg = root.appendingPathComponent("vector.svg")
+    let pdf = root.appendingPathComponent("document.pdf")
+    try writeMetadataTestJPEG(to: first)
+    try writeMetadataTestJPEG(to: second)
+    let unrecognizedExtension = root.appendingPathComponent("photo.unknown")
+    try FileManager.default.copyItem(at: first, to: unrecognizedExtension)
+    #expect(ImagePreviewSupport.isImage(unrecognizedExtension))
+    let svgData = Data("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 40 20\"><rect width=\"20\" height=\"20\" fill=\"red\"/><rect x=\"20\" width=\"20\" height=\"20\" fill=\"blue\"/></svg>".utf8)
+    try svgData.write(to: svg)
+    try Data("PDF placeholder".utf8).write(to: pdf)
+
+    let report = await FileOperationService().rotate([first, svg, second, pdf], quarterTurns: 1)
+
+    #expect(report.succeeded.map(\.source) == [first, svg, second])
+    #expect(report.skipped.map(\.source) == [pdf])
+    #expect(report.failed.isEmpty)
+    let rotatedSVG = try XMLDocument(contentsOf: svg, options: [])
+    #expect(rotatedSVG.rootElement()?.attribute(forName: "viewBox")?.stringValue == "0 0 20.0 40.0")
+    #expect(rotatedSVG.rootElement()?.attribute(forName: "width")?.stringValue == "20")
+    #expect(rotatedSVG.rootElement()?.attribute(forName: "height")?.stringValue == "40")
+    #expect(rotatedSVG.rootElement()?.elements(forName: "g").first?.attribute(forName: "transform")?.stringValue == "matrix(0 1 -1 0 20.0 -0.0)")
+    #expect(NSImage(contentsOf: svg) != nil)
+    #expect((try imageProperties(at: first)[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value == CGImagePropertyOrientation.right.rawValue)
+    #expect((try imageProperties(at: second)[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value == CGImagePropertyOrientation.right.rawValue)
+}
+
+@Test func rotationKeepsGIFFramesAndBMPFormat() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let gif = root.appendingPathComponent("animation.gif")
+    let bmp = root.appendingPathComponent("picture.bmp")
+    let bitmap = try #require(NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 2,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+        isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 16, bitsPerPixel: 32
+    ))
+    bitmap.setColor(.red, atX: 0, y: 0)
+    let gifFixture = try #require(Data(base64Encoded: "R0lGODlhBAACAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQAFAAAACwAAAAABAACAAAIBwABCBwoMCAAIfkEAR4AAQAsAAAAAAQAAgCBAAD/AAAAAAAAAAAACAcAAQgcKDAgADs="))
+    try gifFixture.write(to: gif)
+    let originalGIF = try #require(CGImageSourceCreateWithURL(gif as CFURL, nil))
+    #expect(CGImageSourceGetCount(originalGIF) == 2)
+    let bmpData = try #require(bitmap.representation(using: .bmp, properties: [:]))
+    try bmpData.write(to: bmp)
+
+    _ = try SafeImageRotator.rotateInPlace(at: gif, quarterTurns: 1)
+    _ = try SafeImageRotator.rotateInPlace(at: bmp, quarterTurns: -1)
+    let gifSource = try #require(CGImageSourceCreateWithURL(gif as CFURL, nil))
+    let bmpSource = try #require(CGImageSourceCreateWithURL(bmp as CFURL, nil))
+    #expect(CGImageSourceGetCount(gifSource) == 2)
+    #expect(CGImageSourceGetType(gifSource) as String? == "com.compuserve.gif")
+    #expect(CGImageSourceGetType(bmpSource) as String? == "com.microsoft.bmp")
+    #expect(CGImageSourceCreateImageAtIndex(gifSource, 0, nil)?.width == 2)
+    #expect(CGImageSourceCreateImageAtIndex(gifSource, 0, nil)?.height == 4)
+    let gifFrame = try #require(CGImageSourceCopyPropertiesAtIndex(gifSource, 0, nil) as? [CFString: Any])
+    let gifProperties = try #require(gifFrame[kCGImagePropertyGIFDictionary] as? [CFString: Any])
+    #expect((gifProperties[kCGImagePropertyGIFDelayTime] as? NSNumber)?.doubleValue == 0.2)
+    #expect(CGImageSourceCreateImageAtIndex(bmpSource, 0, nil)?.width == 2)
+    #expect(CGImageSourceCreateImageAtIndex(bmpSource, 0, nil)?.height == 4)
+}
+
+@Test func svgRightRotationMovesLeftHalfToTop() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let svg = root.appendingPathComponent("direction.svg")
+    let leftSVG = root.appendingPathComponent("left-direction.svg")
+    try Data("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 40 20\"><rect width=\"20\" height=\"20\" fill=\"red\"/><rect x=\"20\" width=\"20\" height=\"20\" fill=\"blue\"/></svg>".utf8).write(to: svg)
+    try FileManager.default.copyItem(at: svg, to: leftSVG)
+    _ = try SafeImageRotator.rotateInPlace(at: svg, quarterTurns: 1)
+    _ = try SafeImageRotator.rotateInPlace(at: leftSVG, quarterTurns: -1)
+    func sample(_ file: URL, atY y: Int) throws -> NSColor {
+        let image = try #require(NSImage(contentsOf: file))
+        let output = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 20, pixelsHigh: 40,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 80, bitsPerPixel: 32))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: output))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        image.draw(in: NSRect(x: 0, y: 0, width: 20, height: 40), from: .zero,
+                   operation: .copy, fraction: 1)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return try #require(output.colorAt(x: 10, y: y)?.usingColorSpace(.deviceRGB))
+    }
+    let svgTop = try sample(svg, atY: 5)
+    let svgBottom = try sample(svg, atY: 35)
+    let leftTop = try sample(leftSVG, atY: 5)
+    let leftBottom = try sample(leftSVG, atY: 35)
+    #expect(svgTop.redComponent > svgTop.blueComponent)
+    #expect(svgBottom.blueComponent > svgBottom.redComponent)
+    #expect(leftTop.blueComponent > leftTop.redComponent)
+    #expect(leftBottom.redComponent > leftBottom.blueComponent)
+}
+
 private func writeMetadataTestJPEG(to url: URL) throws {
     let representation = try #require(NSBitmapImageRep(
         bitmapDataPlanes: nil,

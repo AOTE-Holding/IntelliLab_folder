@@ -521,7 +521,7 @@ struct FileGridItem: View {
             await loadThumbnail()
         }
         .onChange(of: thumbnailService.cacheGeneration) { _ in
-            guard thumbnailService.invalidatedThumbnailPath == item.path.standardizedFileURL.path else { return }
+            guard thumbnailService.invalidatedThumbnailPaths.contains(item.path.standardizedFileURL.path) else { return }
             Task { await loadThumbnail() }
         }
     }
@@ -559,16 +559,21 @@ struct FileContextMenu: View {
     private var isItemSelected: Bool { effectiveSelectedIDs.contains(item.id) }
 
     /// Kontextaktionen beziehen sich auf die Auswahl, wenn das angeklickte
-    /// Element Teil davon ist. Einzeldateiaktionen bleiben bei einer
-    /// Mehrfachauswahl bewusst gesperrt.
+    /// Element Teil davon ist.
     private var operationItemCount: Int {
         isItemSelected ? effectiveSelectedIDs.count : 1
     }
 
     private let imageExtensions = SafeImageRotator.supportedExtensions
 
-    private var isImageFile: Bool {
-        item.type == .file && imageExtensions.contains(item.path.pathExtension.lowercased())
+    private var rotationItems: [FileSystemItem] {
+        isItemSelected ? effectiveItems.filter { effectiveSelectedIDs.contains($0.id) } : [item]
+    }
+
+    private var hasRotatableImage: Bool {
+        rotationItems.contains {
+            $0.type == .file && imageExtensions.contains($0.path.pathExtension.lowercased())
+        }
     }
 
     var body: some View {
@@ -676,15 +681,10 @@ struct FileContextMenu: View {
         Button("Duplicate") { duplicateItems() }
         Button("Compress") { compressItems() }
 
-        if isImageFile {
-            if operationItemCount == 1 {
-                Menu("Rotate Image") {
-                    Button("Rotate Left (90°)") { rotateImage(degrees: -90) }
-                    Button("Rotate Right (90°)") { rotateImage(degrees: 90) }
-                }
-            } else {
-                Button("Rotate Image") {}
-                    .disabled(true)
+        if hasRotatableImage {
+            Menu("Rotate Image") {
+                Button("Rotate Left (90°)") { rotateImage(degrees: -90) }
+                Button("Rotate Right (90°)") { rotateImage(degrees: 90) }
             }
         }
 
@@ -818,7 +818,6 @@ struct FileContextMenu: View {
     }
 
     private func rotateImage(degrees: CGFloat) {
-        guard operationItemCount == 1 else { return }
-        operationCoordinator.rotate(item.path, quarterTurns: Int((degrees / 90).rounded()))
+        operationCoordinator.rotate(rotationItems.map(\.path), quarterTurns: Int((degrees / 90).rounded()))
     }
 }

@@ -18,10 +18,7 @@ class ThumbnailService: ObservableObject {
     /// the cache key prevents an in-flight old decode from being reused after
     /// a rotation has completed.
     @Published private(set) var cacheGeneration: UInt = 0
-    @Published private(set) var invalidatedThumbnailPath: String?
-
-    // Supported image formats
-    private let imageExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "heic", "heif", "webp", "ico", "icns"]
+    @Published private(set) var invalidatedThumbnailPaths: Set<String> = []
 
     // Supported document formats for thumbnails
     private let documentExtensions: Set<String> = ["pdf"]
@@ -35,7 +32,7 @@ class ThumbnailService: ObservableObject {
     /// Check if a file supports thumbnail generation
     func supportsThumbnail(for path: String) -> Bool {
         let fileExtension = (path as NSString).pathExtension.lowercased()
-        return imageExtensions.contains(fileExtension) || documentExtensions.contains(fileExtension)
+        return ImagePreviewSupport.isImage(URL(fileURLWithPath: path)) || documentExtensions.contains(fileExtension)
     }
 
     /// Get thumbnail for a file
@@ -57,8 +54,12 @@ class ThumbnailService: ObservableObject {
         // Generate thumbnail based on file type
         var thumbnail: NSImage?
 
-        if imageExtensions.contains(fileExtension) {
+        if ImagePreviewSupport.isImage(URL(fileURLWithPath: path)) {
             thumbnail = await generateImageThumbnail(path: path, size: size)
+                ?? generateVectorThumbnail(path: path, size: size)
+            if thumbnail == nil {
+                thumbnail = await generateQuickLookThumbnail(path: path, size: size)
+            }
         } else if documentExtensions.contains(fileExtension) {
             thumbnail = await generateQuickLookThumbnail(path: path, size: size)
         }
@@ -98,6 +99,43 @@ class ThumbnailService: ObservableObject {
             cgImage: image.value,
             size: NSSize(width: image.value.width, height: image.value.height)
         )
+    }
+
+    private func generateVectorThumbnail(path: String, size: CGSize) -> NSImage? {
+        guard URL(fileURLWithPath: path).pathExtension.lowercased() == "svg",
+              let image = NSImage(contentsOfFile: path),
+              image.isValid,
+              image.size.width > 0, image.size.height > 0,
+              image.size.width.isFinite, image.size.height.isFinite else { return nil }
+
+        // The same thumbnail is passed to Quick Look as its transition image.
+        // Returning the source NSImage here exposes the SVG's intrinsic size
+        // (often 1024 pt or more), which makes the opening transition expand
+        // from a huge image instead of the visible file tile.
+        let maxSide = max(size.width, size.height) * 2
+        let scale = min(1, maxSide / max(image.size.width, image.size.height))
+        let width = max(1, Int((image.size.width * scale).rounded()))
+        let height = max(1, Int((image.size.height * scale).rounded()))
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let context = NSGraphicsContext(bitmapImageRep: bitmap) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        image.draw(in: NSRect(x: 0, y: 0, width: width, height: height),
+                   from: .zero, operation: .copy, fraction: 1)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let cgImage = bitmap.cgImage else { return nil }
+        return NSImage(cgImage: cgImage, size: NSSize(width: width, height: height))
     }
 
     /// Generate thumbnail using Quick Look Thumbnailing service
@@ -140,8 +178,13 @@ class ThumbnailService: ObservableObject {
     /// generation and request a fresh thumbnail without needing to be closed,
     /// reselected or recreated.
     func invalidateThumbnail(for path: String) {
+        invalidateThumbnails(for: [path])
+    }
+
+    func invalidateThumbnails(for paths: [String]) {
+        guard !paths.isEmpty else { return }
         cache.removeAllObjects()
+        invalidatedThumbnailPaths = Set(paths.map { URL(fileURLWithPath: $0).standardizedFileURL.path })
         cacheGeneration &+= 1
-        invalidatedThumbnailPath = URL(fileURLWithPath: path).standardizedFileURL.path
     }
 }

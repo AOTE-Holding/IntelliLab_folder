@@ -415,20 +415,50 @@ actor FileOperationService {
         }
     }
 
-    /// Rotates the selected image in place. The encoded output is first
-    /// validated in a sibling temporary file, then atomically replaces the
-    /// original path. File metadata is copied where the volume permits it.
-    func rotate(_ source: URL, quarterTurns: Int) async -> FileOperationReport {
-        do {
-            let destination = try SafeImageRotator.rotateInPlace(
-                at: source,
-                quarterTurns: quarterTurns,
-                fileManager: fileManager
-            )
-            return FileOperationReport(kind: .rotate, results: [result(source: source, destination: destination, outcome: .succeeded)])
-        } catch {
-            return FileOperationReport(kind: .rotate, results: [result(source: source, outcome: .failed, message: error.localizedDescription)])
+    /// Rotate each eligible image independently. A failed image leaves the
+    /// other selected files available for processing.
+    func rotate(
+        _ sources: [URL],
+        quarterTurns: Int,
+        progress: ProgressHandler? = nil
+    ) async -> FileOperationReport {
+        var results: [FileOperationItemResult] = []
+        results.reserveCapacity(sources.count)
+        await progress?(FileOperationProgress(completed: 0, total: sources.count, currentItem: sources.first))
+
+        for (index, source) in sources.enumerated() {
+            if Task.isCancelled {
+                results.append(contentsOf: sources[index...].map {
+                    result(source: $0, outcome: .cancelled, message: "Operation cancelled.")
+                })
+                break
+            }
+
+            if !SafeImageRotator.supportedExtensions.contains(source.pathExtension.lowercased()) {
+                results.append(result(
+                    source: source,
+                    outcome: .skipped,
+                    message: "This file type cannot be rotated without changing its format."
+                ))
+            } else {
+                do {
+                    let destination = try SafeImageRotator.rotateInPlace(
+                        at: source,
+                        quarterTurns: quarterTurns,
+                        fileManager: fileManager
+                    )
+                    results.append(result(source: source, destination: destination, outcome: .succeeded))
+                } catch {
+                    results.append(result(source: source, outcome: .failed, message: error.localizedDescription))
+                }
+            }
+            await progress?(FileOperationProgress(
+                completed: results.count,
+                total: sources.count,
+                currentItem: sources.indices.contains(index + 1) ? sources[index + 1] : nil
+            ))
         }
+        return FileOperationReport(kind: .rotate, results: results)
     }
 
     private func uniqueURL(for url: URL) -> URL {
@@ -700,12 +730,21 @@ actor FileOperationService {
 }
 
 enum SafeImageRotator {
-    static let supportedExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "heif", "tif", "tiff"]
+    static let supportedExtensions: Set<String> = [
+        "jpg", "jpeg", "png", "heic", "heif", "tif", "tiff", "svg",
+        "bmp", "gif", "ico", "icns", "jp2", "j2k"
+    ]
 
     static func rotateInPlace(at source: URL, quarterTurns: Int, fileManager: FileManager = .default) throws -> URL {
         let ext = source.pathExtension.lowercased()
         guard supportedExtensions.contains(ext) else {
             throw FileOperationError.unsupportedImageFormat(ext.isEmpty ? "unknown" : ext)
+        }
+        if ext == "svg" {
+            return try SVGImageRotator.rotateInPlace(at: source, quarterTurns: quarterTurns, fileManager: fileManager)
+        }
+        if ReencodedImageRotator.supportedExtensions.contains(ext) {
+            return try ReencodedImageRotator.rotateInPlace(at: source, quarterTurns: quarterTurns, fileManager: fileManager)
         }
         guard let input = CGImageSourceCreateWithURL(source as CFURL, nil),
               let sourceType = CGImageSourceGetType(input),

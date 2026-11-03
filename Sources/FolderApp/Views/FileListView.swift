@@ -532,7 +532,7 @@ struct FileListRow: View {
             await loadThumbnail()
         }
         .onChange(of: thumbnailService.cacheGeneration) { _ in
-            guard thumbnailService.invalidatedThumbnailPath == item.path.standardizedFileURL.path else { return }
+            guard thumbnailService.invalidatedThumbnailPaths.contains(item.path.standardizedFileURL.path) else { return }
             Task { await loadThumbnail() }
         }
     }

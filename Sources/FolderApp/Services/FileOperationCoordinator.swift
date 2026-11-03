@@ -104,6 +104,7 @@ final class FileOperationCoordinator: ObservableObject {
     @Published private(set) var progress: FileOperationProgress?
     @Published private(set) var transferProgressSamples: [TransferProgressSample] = []
     @Published private(set) var operationStartedAt: Date?
+    @Published private(set) var activeOperationKind: FileOperationKind?
     @Published private(set) var progressPresentationOffset = CGSize.zero
     @Published var pendingConflict: PendingConflict?
     @Published var presentedReport: PresentedReport?
@@ -314,19 +315,20 @@ final class FileOperationCoordinator: ObservableObject {
         }
     }
 
-    func rotate(_ source: URL, quarterTurns: Int) {
+    func rotate(_ sources: [URL], quarterTurns: Int) {
         guard FileOperationPolicy.isEnabled else { return }
-        start {
-            let access = PermissionCenter.shared.beginAccess(to: source)
-            defer { access?.stop() }
-            let report = await self.service.rotate(source, quarterTurns: quarterTurns)
+        start(kind: .rotate) {
+            let accessTokens = sources.compactMap { PermissionCenter.shared.beginAccess(to: $0) }
+            defer { accessTokens.forEach { $0.stop() } }
+            let report = await self.service.rotate(sources, quarterTurns: quarterTurns, progress: self.progressHandler)
 
             // Die Datei bleibt am gleichen Pfad. Thumbnails sind ebenfalls
             // nach Pfad gepuffert und würden sonst das Bild vor der Rotation
             // zeigen, obwohl die neue Datei bereits auf der Platte liegt.
-            if !report.succeeded.isEmpty {
-                ThumbnailService.shared.invalidateThumbnail(for: source.path)
-                QuickLookManager.shared.refreshPreview(for: source)
+            let rotated = report.succeeded.map(\.source)
+            if !rotated.isEmpty {
+                ThumbnailService.shared.invalidateThumbnails(for: rotated.map(\.path))
+                rotated.forEach { QuickLookManager.shared.refreshPreview(for: $0) }
             }
             self.finish(report)
         }
@@ -408,9 +410,10 @@ final class FileOperationCoordinator: ObservableObject {
         transferProgressSamples.removeAll { now.timeIntervalSince($0.timestamp) > transferGraphWindow }
     }
 
-    private func start(_ operation: @escaping @MainActor () async -> Void) {
+    private func start(kind: FileOperationKind? = nil, _ operation: @escaping @MainActor () async -> Void) {
         guard !isProcessing else { return }
         isProcessing = true
+        activeOperationKind = kind
         isProgressPresentationVisible = false
         isProgressPresentationMinimized = false
         isCancellationRequested = false
@@ -439,6 +442,7 @@ final class FileOperationCoordinator: ObservableObject {
             self.isCancellationRequested = false
             self.progress = nil
             self.operationStartedAt = nil
+            self.activeOperationKind = nil
             self.progressPresentationOffset = .zero
             self.lastProgressSampleAt = nil
             self.lastProgressSampleCompleted = 0
@@ -508,7 +512,8 @@ final class FileOperationCoordinator: ObservableObject {
         // A completed operation is reflected by the refreshed file browser.
         // Reserve the modal result view for actual failures, where the user
         // needs the per-item error and a way to reveal the affected item.
-        presentedReport = report.failed.isEmpty ? nil : PresentedReport(report: report)
+        presentedReport = report.failed.isEmpty && (report.kind != .rotate || report.skipped.isEmpty)
+            ? nil : PresentedReport(report: report)
         NotificationCenter.default.post(name: .fileOperationDidFinish, object: report)
     }
 }

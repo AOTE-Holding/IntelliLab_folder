@@ -270,26 +270,30 @@ class QuickLookManager: NSObject, ObservableObject, QLPreviewPanelDataSource, QL
             }
             self.refreshedPreviewURLs[normalizedURL] = previewURL
 
-            guard let panel = QLPreviewPanel.shared(),
-                  panel.isVisible,
-                  self.previewItems.indices.contains(self.currentIndex),
-                  self.previewItems[self.currentIndex].sourceURL.standardizedFileURL == normalizedURL else { return }
-
-            let current = self.previewItems[self.currentIndex]
-            self.previewItems[self.currentIndex] = ManagedQuickLookItem(
+            guard let index = self.previewItems.firstIndex(where: {
+                $0.sourceURL.standardizedFileURL == normalizedURL
+            }) else { return }
+            let current = self.previewItems[index]
+            self.previewItems[index] = ManagedQuickLookItem(
                 sourceURL: current.sourceURL,
                 previewURL: previewURL,
                 title: current.previewItemTitle ?? current.sourceURL.lastPathComponent,
                 isFolder: false
             )
-            panel.reloadData()
-            panel.currentPreviewItemIndex = self.currentIndex
+            if let panel = QLPreviewPanel.shared(), panel.isVisible, index == self.currentIndex {
+                self.updatePreviewContentSize(in: panel, for: self.previewItems[index])
+                panel.reloadData()
+                panel.currentPreviewItemIndex = index
+            }
         }
     }
 
     nonisolated private static func createFreshPreviewCopy(for source: URL) -> URL? {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("Folder-QuickLook-Refresh", isDirectory: true)
+        if source.pathExtension.lowercased() == "svg" {
+            return ImagePreviewSupport.createSVGPreview(for: source, in: directory)
+        }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let ext = source.pathExtension
@@ -395,6 +399,12 @@ class QuickLookManager: NSObject, ObservableObject, QLPreviewPanelDataSource, QL
                     previewSessionID: folderPreviewSessionID,
                     appearance: previewAppearance
                 )) ?? item.path
+            } else if item.path.pathExtension.lowercased() == "svg",
+                      let generatedDirectory,
+                      let svgPreview = ImagePreviewSupport.createSVGPreview(for: item.path, in: generatedDirectory) {
+                // Always render SVG from the current source. Earlier refreshes
+                // may have cached a raw .svg copy that Quick Look opens zoomed.
+                previewURL = svgPreview
             } else if let refreshedURL = refreshedPreviewURLs[item.path.standardizedFileURL],
                       FileManager.default.fileExists(atPath: refreshedURL.path) {
                 previewURL = refreshedURL
@@ -595,7 +605,17 @@ class QuickLookManager: NSObject, ObservableObject, QLPreviewPanelDataSource, QL
     /// Finder keeps an untouched Quick Look panel visually centered as its
     /// content changes; once the user drags it, preserve that chosen position.
     private func updatePreviewContentSize(in panel: QLPreviewPanel, for item: ManagedQuickLookItem) {
-        let targetSize = item.isFolder ? Self.finderPreviewContentSize : standardPreviewContentSize
+        let targetSize: NSSize
+        if item.isFolder {
+            targetSize = Self.finderPreviewContentSize
+        } else if item.sourceURL.pathExtension.lowercased() == "svg",
+                  let previewURL = item.previewItemURL,
+                  previewURL.pathExtension.lowercased() == "png",
+                  let image = NSImage(contentsOf: previewURL) {
+            targetSize = image.size
+        } else {
+            targetSize = standardPreviewContentSize
+        }
         isApplyingPreviewPanelGeometry = true
         pendingProgrammaticPreviewContentSizes.append(targetSize)
         // Resizes are delivered asynchronously by QLPreviewPanel. Retain a

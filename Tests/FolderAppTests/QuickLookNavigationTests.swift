@@ -1,5 +1,7 @@
 import Testing
 import Foundation
+import ImageIO
+import AppKit
 @testable import FolderApp
 
 @Test func quickLookScrollMovesWithinThePreviewListWithoutWrapping() {
@@ -59,6 +61,52 @@ import Foundation
         for: html,
         in: root.appendingPathComponent("Preview", isDirectory: true)
     ) == nil)
+}
+
+@Test func svgUsesRenderedImagePreviewInsteadOfSourceText() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FolderSVGPreviewTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let source = root.appendingPathComponent("shape.SVG")
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\"><rect width=\"40\" height=\"20\" fill=\"red\"/></svg>"
+    try Data(svg.utf8).write(to: source)
+
+    #expect(ImagePreviewSupport.isImage(source))
+    #expect(ImagePreviewSupport.isImage(root.appendingPathComponent("photo.png")))
+    #expect(!ImagePreviewSupport.isImage(root.appendingPathComponent("notes.txt")))
+    #expect(FolderQuickLookPreview.createTextDocument(for: source, in: root) == nil)
+
+    let preview = try #require(ImagePreviewSupport.createSVGPreview(for: source, in: root))
+    #expect(preview.pathExtension == "png")
+    let image = try #require(CGImageSourceCreateWithURL(preview as CFURL, nil))
+    #expect(CGImageSourceGetCount(image) == 1)
+    let rendered = try #require(CGImageSourceCreateImageAtIndex(image, 0, nil))
+    #expect(rendered.width == 650)
+    #expect(rendered.height == 325)
+
+    let broken = root.appendingPathComponent("broken.svg")
+    try Data("<svg><not-closed>".utf8).write(to: broken)
+    let errorPreview = try #require(ImagePreviewSupport.createSVGPreview(for: broken, in: root))
+    #expect(try String(contentsOf: errorPreview, encoding: .utf8).contains("SVG image is invalid"))
+}
+
+@MainActor @Test func largeSVGTransitionThumbnailFitsTheFileTile() async throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FolderSVGThumbnailTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let source = root.appendingPathComponent("large.svg")
+    let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1024\" height=\"512\"><rect width=\"1024\" height=\"512\" fill=\"red\"/></svg>"
+    try Data(svg.utf8).write(to: source)
+
+    let thumbnail = try #require(await ThumbnailService.shared.getThumbnail(
+        for: source.path,
+        size: CGSize(width: 128, height: 128)
+    ))
+    #expect(thumbnail.size.width == 256)
+    #expect(thumbnail.size.height == 128)
+    #expect(thumbnail.cgImage(forProposedRect: nil, context: nil, hints: nil) != nil)
 }
 
 @Test func quickLookPreparesFolderContentsBeforeThePanelIsVisible() {

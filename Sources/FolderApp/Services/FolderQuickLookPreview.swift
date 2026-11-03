@@ -95,7 +95,8 @@ enum FolderQuickLookPreview {
         // HTML is a document, not merely source code: hand it to macOS's web
         // preview so relative CSS/assets and the rendered page are preserved.
         // Other UTF-8 source/config files use Folder's native text reader.
-        guard !["html", "htm"].contains(fileURL.pathExtension.lowercased()) else {
+        guard !["html", "htm"].contains(fileURL.pathExtension.lowercased()),
+              !ImagePreviewSupport.isImage(fileURL) else {
             return nil
         }
         guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),

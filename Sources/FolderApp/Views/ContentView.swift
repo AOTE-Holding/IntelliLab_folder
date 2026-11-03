@@ -263,12 +263,14 @@ struct FolderBrowserView: View {
                 if operationCoordinator.isProgressPresentationMinimized {
                     MinimizedFileOperationProgressView(
                         progress: operationCoordinator.progress,
+                        isRotation: operationCoordinator.activeOperationKind == .rotate,
                         onRestore: { operationCoordinator.restoreProgressPresentation() }
                     )
                     .padding(20)
                 } else {
                     FileOperationProgressView(
                         progress: operationCoordinator.progress,
+                        isRotation: operationCoordinator.activeOperationKind == .rotate,
                         samples: operationCoordinator.transferProgressSamples,
                         isCancellationRequested: operationCoordinator.isCancellationRequested,
                         onCancel: { operationCoordinator.cancel() },

@@ -2,6 +2,7 @@ import SwiftUI
 
 struct FileOperationProgressView: View {
     let progress: FileOperationProgress?
+    let isRotation: Bool
     let samples: [FileOperationCoordinator.TransferProgressSample]
     let isCancellationRequested: Bool
     let onCancel: () -> Void
@@ -19,7 +20,7 @@ struct FileOperationProgressView: View {
                 HStack(alignment: .center, spacing: 10) {
                     TransferWindowControls(onMinimize: onMinimize)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(isCancellationRequested ? "Cancelling File Operation…" : "Transferring Files")
+                        Text(isCancellationRequested ? "Cancelling File Operation…" : (isRotation ? "Rotating Images" : "Transferring Files"))
                             .font(.headline.weight(.semibold))
                         if let progress {
                             Text("\(progress.completed) of \(progress.total) items completed")
@@ -72,7 +73,7 @@ struct FileOperationProgressView: View {
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                             Spacer(minLength: 8)
-                            if let rate = transferRate(for: progress, elapsed: elapsed) {
+                            if !isRotation, let rate = transferRate(for: progress, elapsed: elapsed) {
                                 Text(rate)
                                     .font(.caption.monospacedDigit())
                                     .foregroundStyle(.secondary)
@@ -86,31 +87,33 @@ struct FileOperationProgressView: View {
                         .progressViewStyle(.linear)
                 }
 
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        showsDetails.toggle()
+                if !isRotation {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            showsDetails.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: showsDetails ? "chevron.up" : "chevron.down")
+                            Text(showsDetails ? "Hide Transfer Details" : "Show Transfer Details")
+                                .font(.caption.weight(.semibold))
+                            Spacer()
+                            Text("Last 10 seconds")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .foregroundStyle(Color.folderAccent)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(Color.folderAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                     }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: showsDetails ? "chevron.up" : "chevron.down")
-                        Text(showsDetails ? "Hide Transfer Details" : "Show Transfer Details")
-                            .font(.caption.weight(.semibold))
-                        Spacer()
-                        Text("Last 10 seconds")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    .foregroundStyle(Color.folderAccent)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 8)
-                    .background(Color.folderAccent.opacity(0.08), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
+                    .buttonStyle(.plain)
 
-                if showsDetails {
-                    TransferRateGraph(samples: samples, referenceDate: timeline.date)
-                        .frame(height: 112)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    if showsDetails {
+                        TransferRateGraph(samples: samples, referenceDate: timeline.date)
+                            .frame(height: 112)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
             }
         }
@@ -235,6 +238,7 @@ private struct TransferWindowControls: View {
 /// überdecken. Ein Klick stellt das vollständige Transferfenster wieder her.
 struct MinimizedFileOperationProgressView: View {
     let progress: FileOperationProgress?
+    let isRotation: Bool
     let onRestore: () -> Void
 
     var body: some View {
@@ -243,7 +247,7 @@ struct MinimizedFileOperationProgressView: View {
                 Image(systemName: "arrow.down.circle.fill")
                     .foregroundStyle(Color.folderAccent)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Transferring Files")
+                    Text(isRotation ? "Rotating Images" : "Transferring Files")
                         .font(.caption.weight(.semibold))
                     if let progress {
                         ProgressView(value: progress.fractionCompleted)
@@ -266,7 +270,7 @@ struct MinimizedFileOperationProgressView: View {
             .overlay(Capsule().stroke(Color.folderStroke.opacity(0.62), lineWidth: 1))
         }
         .buttonStyle(.plain)
-        .help("Show transfer details")
+        .help(isRotation ? "Show rotation progress" : "Show transfer details")
     }
 }
 
@@ -456,7 +460,8 @@ struct FileOperationResultView: View {
 
     private var title: String {
         if report.wasCancelled { return "File Operation Cancelled" }
-        return report.failed.isEmpty ? "File Operation Complete" : "File Operation Finished with Issues"
+        return report.failed.isEmpty && report.skipped.isEmpty
+            ? "File Operation Complete" : "File Operation Finished with Issues"
     }
 
     private var summary: String {
