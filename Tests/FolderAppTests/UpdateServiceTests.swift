@@ -147,3 +147,20 @@ private final class UpdateStubProtocol: URLProtocol {
     #expect(!FileManager.default.fileExists(atPath: target.appendingPathComponent("partial.txt").path))
     #expect(!FileManager.default.fileExists(atPath: backup.path))
 }
+
+@Test @MainActor func installerFailureShowsAnError() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let marker = root.appendingPathComponent("alert-shown")
+    let fakeAlert = root.appendingPathComponent("osascript")
+    try "#!/bin/bash\ntouch \"$ALERT_MARKER\"\n".write(to: fakeAlert, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: fakeAlert.path)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/bash")
+    process.arguments = ["-c", UpdateService.installerWrapper, "test", "/usr/bin/false"]
+    process.environment = ["PATH": "\(root.path):/usr/bin:/bin", "ALERT_MARKER": marker.path]
+    try process.run()
+    process.waitUntilExit()
+    #expect(FileManager.default.fileExists(atPath: marker.path))
+}

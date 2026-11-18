@@ -203,14 +203,15 @@ final class UpdateService: NSObject, ObservableObject {
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
 
             let process = Process()
+            let command: [String]
             if fileManager.isWritableFile(atPath: installURL.deletingLastPathComponent().path) {
-                process.executableURL = URL(fileURLWithPath: "/bin/bash")
-                process.arguments = [scriptURL.path, newAppURL.path, installURL.path, backupURL.path]
+                command = ["/bin/bash", scriptURL.path, newAppURL.path, installURL.path, backupURL.path]
             } else {
-                let command = "/bin/bash \(shellQuote(scriptURL.path)) \(shellQuote(newAppURL.path)) \(shellQuote(installURL.path)) \(shellQuote(backupURL.path))"
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                process.arguments = ["-e", "do shell script \(appleScriptQuote(command)) with administrator privileges"]
+                let installer = "/bin/bash \(shellQuote(scriptURL.path)) \(shellQuote(newAppURL.path)) \(shellQuote(installURL.path)) \(shellQuote(backupURL.path))"
+                command = ["/usr/bin/osascript", "-e", "do shell script \(appleScriptQuote(installer)) with administrator privileges"]
             }
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = ["-c", Self.installerWrapper, "folder-update"] + command
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             try process.run()
@@ -219,6 +220,12 @@ final class UpdateService: NSObject, ObservableObject {
             showError("Failed to start the update installer: \(error.localizedDescription)")
         }
     }
+
+    static let installerWrapper = """
+        if ! "$@"; then
+          osascript -e 'display alert "Folder update failed" message "The update could not be installed. Please open Folder and try again." as warning' || true
+        fi
+        """
 
     static let installerScript = """
         #!/bin/bash

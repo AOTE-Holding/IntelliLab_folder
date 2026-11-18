@@ -1,5 +1,71 @@
 # Folder App - Changelog
 
+Die Einträge für 1.1.2 bis 1.2.7 wurden nachträglich aus Git-Tags, Commits und Projektnotizen rekonstruiert. Sie fassen belegte Änderungen zusammen und sind keine vollständigen ursprünglichen Release-Notizen.
+
+## 1.2.8
+
+- Bei einer fehlgeschlagenen oder abgebrochenen Updateinstallation erscheint eine Fehlermeldung.
+
+## 1.2.7
+
+- SVG-Dateien werden in Quick Look als Bild dargestellt; die Vorschau nach einer Rotation wurde verbessert.
+- Mehrere ausgewählte Bilder können gemeinsam gedreht werden. SVG bleibt dabei ein Vektorformat; weitere unterstützte Bildformate werden im vorhandenen Format verarbeitet.
+- SVG-Vorschaubilder und der Übergang zur Vorschau wurden angepasst.
+
+## 1.2.6
+
+- „Open VS Code Here“ zum Öffnen eines Ordners in Visual Studio Code ergänzt.
+- Dateiverwaltung, Auswahl, Navigation, Sidebar und Einstellungen überarbeitet.
+
+## 1.2.5
+
+- Dateivorgänge, Auswahl, Quick Look, Berechtigungen und Einstellungen überarbeitet.
+- Updateprüfung unterscheidet fehlendes Installationsarchiv von einer aktuellen Installation; bei fehlgeschlagener Kopie ist eine Wiederherstellung der vorherigen App vorgesehen.
+
+## 1.2.4
+
+- Updateprüfung und Installation über GitHub Releases wiederhergestellt; Sparkle wurde entfernt.
+
+## 1.2.3
+
+- Release-Build und Updatekonfiguration überarbeitet, damit Updates in Produktionsbuilds nicht als Entwicklungsfunktion deaktiviert sind. Der Updateansatz wurde in 1.2.4 erneut geändert.
+
+## 1.2.2
+
+- Sidebar-Umschalter und Verhalten bei schmalen Fenstern korrigiert.
+- Suche bleibt bei Fokusverlust erhalten und zeigt Ergebnisse schrittweise; macOS-Pakete werden nicht durchsucht.
+- Applications als Standardfavorit ergänzt; Favoriten zeigen ihren Pfad.
+- Release-Build kann ohne hinterlegte Signierschlüssel veröffentlicht werden.
+
+## 1.2.1
+
+- Speicherung von Favoriten und Einstellungen bei Updates verbessert.
+- Erscheinungsbild, Finder-Farb-Tags, Terminalaufruf und Berechtigungseinstellungen korrigiert.
+- Ordnerdarstellung, Suche und Tastaturnavigation verbessert.
+
+## 1.2.0
+
+- Größere Überarbeitung der Oberfläche, Dateiverwaltung, Vorschau, Navigation und Berechtigungen.
+
+## 1.1.4
+
+- Namenskonflikt beim wiederholten Erstellen eines Ordners „Untitled Folder“ korrigiert.
+
+## 1.1.3
+
+- App-Registrierung nach Updates angepasst, um doppelte Dock-Einträge zu vermeiden.
+
+## 1.1.2
+
+- Automatische Updates, Standardeinstellungen und Fensterverhalten ergänzt beziehungsweise verbessert.
+- Suche, Dateivorgänge, Navigation und Darstellung optimiert; mehrere Fehler behoben.
+
+---
+
+## Historische Entwicklungsnotizen
+
+Die folgenden ursprünglichen Einträge stammen aus dem Jahr 2025 und geben den damaligen Entwicklungsstand wieder.
+
 ## Phase 1.6 - Image Previews & Quick Look Integration (Latest Build)
 
 ### ✅ Implemented Features
